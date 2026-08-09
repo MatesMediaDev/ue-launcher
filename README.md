@@ -91,7 +91,7 @@ Default install dir: `~/UnrealEngine/UE_X.Y.Z`. Engine zips are large (~25–40�
 | `keep_engine_zips` | Keep zip after extract (`false` by default) |
 | `project_scan_roots` | Folders to scan for `.uproject` |
 | `preferred_engine` | Preferred engine key (e.g. `UE_5.7`) |
-| `vulkan_icd` | Vulkan ICD JSON path (optional) |
+| `vulkan_icd` | Optional Vulkan ICD JSON. Empty = auto (NVIDIA if present, else RADV). Don’t force NVIDIA on Steam Deck. |
 | `prefer_x11` | Prefer X11 for the editor when set |
 
 ## Notes

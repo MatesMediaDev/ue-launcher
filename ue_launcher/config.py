@@ -47,7 +47,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "keep_engine_zips": False,
     "preferred_engine": "UE_5.7",
     "default_engine_path": str(Path.home() / "UnrealEngine" / "UE_5.7.4"),
-    "vulkan_icd": "/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json",
+    # Empty = auto-detect (NVIDIA ICD if present, else RADV). Never force NVIDIA on Deck/AMD.
+    "vulkan_icd": "",
     "prefer_x11": True,
 }
 
