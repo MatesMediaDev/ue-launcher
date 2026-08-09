@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Unreal Launcher
+GenericName=Unreal Engine Launcher
+Comment=Linux Unreal Engine launcher
+Exec=mates-unreal-launcher
+Icon=mates-unreal-launcher
+Terminal=false
+Categories=Development;IDE;Graphics;
+StartupNotify=true
+Keywords=unreal;ue5;epic;editor;mates;mates.dev;mates media;

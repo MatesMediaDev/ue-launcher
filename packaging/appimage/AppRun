@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# AppRun for Unreal Launcher AppImage
+# Prefer bundled Python + GTK4/libadwaita; fall back to host stack if present.
+set -euo pipefail
+
+HERE="$(dirname "$(readlink -f "${0}")")"
+LOG="${XDG_CACHE_HOME:-$HOME/.cache}/mates-unreal-launcher/appimage.log"
+mkdir -p "$(dirname "$LOG")"
+
+log() { printf '%s\n' "$*" | tee -a "$LOG" >&2; }
+
+die() {
+  log "ERROR: $*"
+  if command -v zenity >/dev/null 2>&1; then
+    zenity --error --title="Unreal Launcher" --width=420 --text="$*" 2>/dev/null || true
+  elif command -v kdialog >/dev/null 2>&1; then
+    kdialog --error "$*" 2>/dev/null || true
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send -u critical "Unreal Launcher" "$*" 2>/dev/null || true
+  fi
+  exit 1
+}
+
+# Bundled runtime paths only (do not inherit Cursor / host junk into the bundle).
+BUNDLE_LIBS=()
+[[ -d "${HERE}/usr/lib" ]] && BUNDLE_LIBS+=("${HERE}/usr/lib")
+[[ -d "${HERE}/usr/lib64" ]] && BUNDLE_LIBS+=("${HERE}/usr/lib64")
+[[ -d "${HERE}/usr/lib/x86_64-linux-gnu" ]] && BUNDLE_LIBS+=("${HERE}/usr/lib/x86_64-linux-gnu")
+
+_ld_bundle=""
+for d in "${BUNDLE_LIBS[@]:-}"; do
+  _ld_bundle="${_ld_bundle:+$_ld_bundle:}$d"
+done
+if [[ -n "$_ld_bundle" ]]; then
+  export LD_LIBRARY_PATH="$_ld_bundle"
+else
+  unset LD_LIBRARY_PATH || true
+fi
+
+if [[ -d "${HERE}/usr/lib/girepository-1.0" ]]; then
+  export GI_TYPELIB_PATH="${HERE}/usr/lib/girepository-1.0"
+else
+  unset GI_TYPELIB_PATH || true
+fi
+
+# Isolated Python path — never append host PYTHONPATH (would import a checkout).
+unset PYTHONPATH || true
+export PYTHONPATH="${HERE}/usr/lib/python3/site-packages"
+
+if [[ -f "${HERE}/usr/pyversion" ]]; then
+  PYV="$(cat "${HERE}/usr/pyversion")"
+  export PYTHONHOME="${HERE}/usr"
+  if [[ -d "${HERE}/usr/lib/python${PYV}" ]]; then
+    export PYTHONPATH="${HERE}/usr/lib/python${PYV}:${PYTHONPATH}"
+  fi
+fi
+
+if [[ -d "${HERE}/usr/share" ]]; then
+  export XDG_DATA_DIRS="${HERE}/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+fi
+if [[ -d "${HERE}/usr/share/glib-2.0/schemas" ]]; then
+  export GSETTINGS_SCHEMA_DIR="${HERE}/usr/share/glib-2.0/schemas"
+fi
+
+# Gdk-pixbuf loaders (png/jpeg for thumbnails)
+if [[ -d "${HERE}/usr/lib/gdk-pixbuf-2.0" ]]; then
+  export GDK_PIXBUF_MODULEDIR="$(find "${HERE}/usr/lib/gdk-pixbuf-2.0" -type d -name loaders 2>/dev/null | head -n1 || true)"
+  QUERY=""
+  [[ -x "${HERE}/usr/bin/gdk-pixbuf-query-loaders" ]] && QUERY="${HERE}/usr/bin/gdk-pixbuf-query-loaders"
+  [[ -z "$QUERY" ]] && QUERY="$(command -v gdk-pixbuf-query-loaders 2>/dev/null || true)"
+  if [[ -n "${GDK_PIXBUF_MODULEDIR:-}" && -n "${QUERY}" ]]; then
+    export GDK_PIXBUF_MODULE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/mates-unreal-launcher/gdk-pixbuf-loaders.cache"
+    mkdir -p "$(dirname "$GDK_PIXBUF_MODULE_FILE")"
+    "${QUERY}" "${GDK_PIXBUF_MODULEDIR}"/* > "${GDK_PIXBUF_MODULE_FILE}" 2>/dev/null || true
+  fi
+fi
+
+if [[ -x "${HERE}/usr/bin/python3" ]]; then
+  PY="${HERE}/usr/bin/python3"
+else
+  PY="$(command -v python3 || true)"
+fi
+[[ -n "${PY}" ]] || die "python3 not found."
+
+if ! "${PY}" -c "import gi" 2>>"$LOG"; then
+  die "PyGObject missing from AppImage (and host).
+
+Steam Deck / SteamOS (immutable — use Distrobox):
+  distrobox create -n mates -i fedora:41
+  distrobox enter mates -- sudo dnf install -y python3-gobject gtk4 libadwaita
+  distrobox enter mates -- mates-unreal-launcher
+
+Fedora/Bazzite:
+  sudo dnf install python3-gobject libadwaita gtk4
+
+Log: $LOG"
+fi
+
+if ! "${PY}" -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw" 2>>"$LOG"; then
+  die "GTK4 / libadwaita not available to Python.
+
+This build should bundle them. If you see this on Deck, run with:
+  APPIMAGE_EXTRACT_AND_RUN=1 ./Unreal_Launcher-x86_64.AppImage
+or share/use Unreal_Launcher-x86_64.run instead.
+
+Fedora/Bazzite fallback:
+  sudo dnf install python3-gobject libadwaita gtk4
+
+Log: $LOG"
+fi
+
+if ! "${PY}" -c "import ue_launcher" 2>>"$LOG"; then
+  die "AppImage is missing the launcher package. Rebuild it.
+Log: $LOG"
+fi
+
+log "Starting Unreal Launcher (python=${PY})"
+# Leave project checkouts so \`python -m\` cannot import a local ue_launcher/
+cd "${HOME:-/}" || cd / || true
+set +e
+"${PY}" -m ue_launcher "$@" >>"$LOG" 2>&1
+rc=$?
+set -e
+if [[ "$rc" -ne 0 ]]; then
+  die "Unreal Launcher crashed (exit $rc).
+
+Steam Deck (no FUSE):
+  chmod +x Unreal_Launcher-x86_64.run
+  ./Unreal_Launcher-x86_64.run
+
+Or:
+  APPIMAGE_EXTRACT_AND_RUN=1 ./Unreal_Launcher-x86_64.AppImage
+
+Log: $LOG"
+fi
+exit "$rc"

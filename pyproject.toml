@@ -1,0 +1,24 @@
+[project]
+name = "mates-unreal-launcher"
+version = "0.1.0"
+description = "Unreal Launcher — Linux-native Unreal Engine launcher"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.31",
+  "curl_cffi>=0.7",
+]
+
+[project.scripts]
+mates-unreal-launcher = "ue_launcher.__main__:main"
+ue-launcher = "ue_launcher.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ue_launcher*"]
+
+[tool.setuptools.package-data]
+ue_launcher = ["assets/*"]
