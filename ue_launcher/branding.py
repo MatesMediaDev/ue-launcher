@@ -96,15 +96,16 @@ def css() -> str:
       padding-right: 10px;
     }}
 
-    /* Keep layout stable; reveal Install on hover/focus/selection */
+    /* Install actions stay visible — hover-only opacity felt like double-click */
     button.mates-install-btn {{
-      opacity: 0;
+      opacity: 0.85;
       transition: opacity 120ms ease;
     }}
 
     row:hover button.mates-install-btn,
     row:selected button.mates-install-btn,
-    row:focus-within button.mates-install-btn {{
+    row:focus-within button.mates-install-btn,
+    listview row:hover button.mates-install-btn {{
       opacity: 1;
     }}
 

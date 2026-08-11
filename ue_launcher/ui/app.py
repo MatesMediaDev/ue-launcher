@@ -33,8 +33,10 @@ from ..plugins import (
     asset_kind,
     build_plugin_linux,
     filter_plugin_assets,
+    install_fab_content,
     install_fab_plugin,
     install_fab_project,
+    is_content_asset,
     is_project_asset,
     plugin_has_linux_binaries,
     plugin_installed_for_asset,
@@ -215,7 +217,7 @@ class MatesUnrealLauncherApp(Adw.Application):
             self._build_projects_page(), "projects", "Projects", "folder-symbolic"
         )
         stack.add_titled_with_icon(
-            self._build_plugins_page(), "plugins", "Plugins", "application-x-addon-symbolic"
+            self._build_plugins_page(), "plugins", "Library", "application-x-addon-symbolic"
         )
         stack.add_titled_with_icon(
             self._build_settings_page(), "settings", "Settings", "preferences-system-symbolic"
@@ -252,6 +254,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.engine_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.engine_list.add_css_class("boxed-list")
+        self.engine_list.set_activate_on_single_click(True)
         self.engine_list.connect(
             "row-activated",
             lambda *_: self._launch_selected_engine(),
@@ -276,6 +279,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         dl_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.engine_download_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.engine_download_list.add_css_class("boxed-list")
+        self.engine_download_list.set_activate_on_single_click(True)
         self.engine_download_list.connect(
             "row-activated",
             lambda *_: self._install_selected_blob(),
@@ -306,6 +310,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.project_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.project_list.add_css_class("boxed-list")
+        self.project_list.set_activate_on_single_click(True)
         self.project_list.connect("row-activated", lambda *_: self._open_selected_project())
         scrolled.set_child(self.project_list)
         box.append(scrolled)
@@ -356,7 +361,8 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         self.plugin_list = Gtk.ListView(model=self.plugin_selection, factory=factory)
         self.plugin_list.add_css_class("boxed-list")
-        self.plugin_list.set_single_click_activate(False)
+        self.plugin_list.set_single_click_activate(True)
+        self.plugin_list.connect("activate", self._on_plugin_list_activate)
         scrolled.set_child(self.plugin_list)
         box.append(scrolled)
         return box
@@ -602,11 +608,33 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         self._plugin_search_timeout_id = GLib.timeout_add(120, _apply)
 
+    def _on_plugin_list_activate(self, _list: Gtk.ListView, position: int) -> None:
+        if self.plugin_store is None:
+            return
+        item = self.plugin_store.get_item(position)
+        if not isinstance(item, PluginListItem):
+            return
+        asset = item.asset
+        kind = asset_kind(asset)
+        if kind == "plugin":
+            engine = self._selected_plugin_engine()
+            installed = (
+                plugin_installed_for_asset(asset, engine=engine) if engine else None
+            )
+            if installed and not plugin_has_linux_binaries(installed):
+                self._build_installed_plugin(installed)
+                return
+            if installed:
+                self.toast(f"{asset.title} is already installed")
+                return
+        self._plugin_install_dialog(asset)
+
     def _on_plugin_list_setup(
         self, _factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem
     ) -> None:
+        list_item.set_activatable(True)
         row = Adw.ActionRow()
-        row.set_activatable(False)
+        row.set_activatable(True)
 
         image = Gtk.Image.new_from_icon_name("application-x-addon-symbolic")
         image.set_pixel_size(40)
@@ -656,7 +684,11 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         asset = item.asset
         kind = asset_kind(asset)
-        kind_label = {"plugin": "Plugin", "project": "Project"}.get(kind, kind.title())
+        kind_label = {
+            "plugin": "Plugin",
+            "project": "Project",
+            "content": "Content",
+        }.get(kind, kind.title())
         engines = ", ".join(asset.engine_versions[-3:]) or "—"
         row.set_title(GLib.markup_escape_text(asset.title))
         row.set_subtitle(f"{kind_label} · {engines}")
@@ -765,7 +797,11 @@ class MatesUnrealLauncherApp(Adw.Application):
             else:
                 plugins_n = sum(1 for a in self.fab_plugins if asset_kind(a) == "plugin")
                 projects_n = sum(1 for a in self.fab_plugins if asset_kind(a) == "project")
-                self._set_status(f"{plugins_n} plugin(s) · {projects_n} project(s)")
+                content_n = sum(1 for a in self.fab_plugins if asset_kind(a) == "content")
+                parts = [f"{plugins_n} plugin(s)", f"{projects_n} project(s)"]
+                if content_n:
+                    parts.append(f"{content_n} content")
+                self._set_status(" · ".join(parts))
 
     def _update_account_label(self) -> None:
         if not self.account_btn:
@@ -856,10 +892,10 @@ class MatesUnrealLauncherApp(Adw.Application):
                     age_label = "just now"
                 else:
                     age_label = f"{int(age // 60)}m ago"
-                self._set_status(f"{len(self.fab_plugins)} plugin(s) · cached {age_label}")
+                self._set_status(f"{len(self.fab_plugins)} library item(s) · cached {age_label}")
                 return
 
-        self._set_status("Loading Fab plugins…")
+        self._set_status("Loading Fab library…")
 
         def worker() -> None:
             try:
@@ -876,11 +912,11 @@ class MatesUnrealLauncherApp(Adw.Application):
             def done() -> bool:
                 if err:
                     self.toast(err)
-                    self._set_status("Plugin library failed")
+                    self._set_status("Fab library failed")
                 else:
                     self.fab_plugins = plugins
                     self._populate_plugins()
-                    self._set_status(f"{len(plugins)} owned plugin(s) · updated")
+                    self._set_status(f"{len(plugins)} library item(s) · updated")
                 return False
 
             GLib.idle_add(done)
@@ -900,11 +936,21 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         kind = asset_kind(asset)
         as_project_pack = is_project_asset(asset)
+        as_content = is_content_asset(asset)
+
+        if as_content and not self.projects:
+            self.toast("Add a project first — content installs into a project")
+            return
 
         dialog = Adw.AlertDialog()
         dialog.set_heading(asset.title)
         if as_project_pack:
             dialog.set_body("Install this Fab project to your projects folder.")
+        elif as_content:
+            dialog.set_body(
+                "Install this Fab content into the project's Content folder "
+                "(World Partition maps need assets at Content root)."
+            )
         else:
             dialog.set_body(
                 "Fab plugins ship Win/Mac binaries only. "
@@ -942,7 +988,17 @@ class MatesUnrealLauncherApp(Adw.Application):
         engine_row.append(engine_dd)
         body.append(engine_row)
 
-        if not as_project_pack:
+        if as_content:
+            project_names = [p.name for p in self.projects]
+            project_dropdown = Gtk.DropDown(model=Gtk.StringList.new(project_names))
+            project_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            project_lbl = Gtk.Label(label="Project", xalign=0)
+            project_lbl.set_size_request(72, -1)
+            project_dropdown.set_hexpand(True)
+            project_row.append(project_lbl)
+            project_row.append(project_dropdown)
+            body.append(project_row)
+        elif not as_project_pack:
             target_dropdown = Gtk.DropDown(
                 model=Gtk.StringList.new(["Engine (Marketplace)", "Project (Plugins/)"])
             )
@@ -979,8 +1035,13 @@ class MatesUnrealLauncherApp(Adw.Application):
             dest.add_css_class("dim-label")
             body.append(dest)
 
+        kind_label = {
+            "plugin": "Plugin",
+            "project": "Project",
+            "content": "Content",
+        }.get(kind, kind.title())
         versions = ", ".join(asset.engine_versions[-6:]) or "—"
-        meta = Gtk.Label(label=f"{kind} · {versions}", xalign=0, wrap=True)
+        meta = Gtk.Label(label=f"{kind_label} · {versions}", xalign=0, wrap=True)
         meta.add_css_class("dim-label")
         body.append(meta)
 
@@ -1000,7 +1061,16 @@ class MatesUnrealLauncherApp(Adw.Application):
                 return
             engine = self.engines[eng_idx]
             project: UProject | None = None
-            if (
+            if as_content:
+                if not self.projects or project_dropdown is None:
+                    self.toast("No project available")
+                    return
+                p_idx = int(project_dropdown.get_selected())
+                if p_idx < 0 or p_idx >= len(self.projects):
+                    self.toast("Select a project")
+                    return
+                project = self.projects[p_idx]
+            elif (
                 not as_project_pack
                 and target_dropdown is not None
                 and int(target_dropdown.get_selected()) == 1
@@ -1013,7 +1083,13 @@ class MatesUnrealLauncherApp(Adw.Application):
                     self.toast("Select a project")
                     return
                 project = self.projects[p_idx]
-            self._start_fab_install(asset, engine, project=project, as_project_pack=as_project_pack)
+            self._start_fab_install(
+                asset,
+                engine,
+                project=project,
+                as_project_pack=as_project_pack,
+                as_content=as_content,
+            )
 
         dialog.connect("response", _on_response)
         assert self.window is not None
@@ -1026,9 +1102,13 @@ class MatesUnrealLauncherApp(Adw.Application):
         *,
         project: UProject | None = None,
         as_project_pack: bool = False,
+        as_content: bool = False,
     ) -> None:
         if self._installing_plugin:
             self.toast("A plugin install is already running")
+            return
+        if as_content and project is None:
+            self.toast("Select a project for content")
             return
 
         where = (
@@ -1056,6 +1136,15 @@ class MatesUnrealLauncherApp(Adw.Application):
                         asset,
                         engine,
                         projects_root,
+                        self.config.plugin_cache_dir,
+                        progress=prog,
+                    )
+                elif as_content:
+                    assert project is not None
+                    dest = install_fab_content(
+                        asset,
+                        engine,
+                        project,
                         self.config.plugin_cache_dir,
                         progress=prog,
                     )

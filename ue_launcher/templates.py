@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import CACHE_DIR
+from .launch import clean_host_env
 from .projects import TemplateInfo
 
 TEMPLATES_CACHE = CACHE_DIR / "templates"
@@ -64,7 +65,9 @@ def ensure_custom_template(
         # Prefer pull when it's a git checkout
         if (dest / ".git").is_dir():
             cmd = ["git", "-C", str(dest), "pull", "--ff-only"]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, check=False, env=clean_host_env()
+            )
             if proc.returncode != 0:
                 # Fall back to fresh clone
                 shutil.rmtree(dest, ignore_errors=True)
@@ -76,7 +79,9 @@ def ensure_custom_template(
         if spec.ref:
             cmd.extend(["--branch", spec.ref])
         cmd.extend([spec.git_url, str(dest)])
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, env=clean_host_env()
+        )
         if proc.returncode != 0:
             raise TemplateError(
                 f"Failed to fetch {spec.name}: {(proc.stderr or proc.stdout).strip()}"

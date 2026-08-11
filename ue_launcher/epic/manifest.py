@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import struct
 import zlib
@@ -22,6 +23,8 @@ class ChunkInfo:
     group_number: int
     window_size: int
     file_size: int
+    sha_hash: bytes = b""
+    secret_guid: tuple[int, int, int, int] | None = None
 
 
 @dataclass
@@ -191,15 +194,19 @@ def _read_body(body: bytes, version: int) -> ParsedManifest:
     count = reader.u32()
     guids = [_read_guid(reader) for _ in range(count)]
     hashes = [reader.u64() for _ in range(count)]
-    for _ in range(count):
-        reader.bytes(20)  # sha
+    shas = [reader.bytes(20) for _ in range(count)]
     groups = [reader.u8() for _ in range(count)]
     windows = [reader.u32() for _ in range(count)]
     sizes = [reader.i64() for _ in range(count)]
+    secret_guids: list[tuple[int, int, int, int] | None] = [None] * count
     if version >= 22:
-        reader.skip(count * 16)
-        reader.skip(count * 4)
-        reader.skip(count * 16)
+        secret_guids = [
+            (reader.u32(), reader.u32(), reader.u32(), reader.u32()) for _ in range(count)
+        ]
+        for _ in range(count):
+            reader.u32()  # window_size_compressed
+        for _ in range(count):
+            reader.bytes(16)  # encryption_tag
     cdl_consumed = reader.pos - cdl_start
     if cdl_consumed < cdl_size:
         reader.skip(cdl_size - cdl_consumed)
@@ -212,6 +219,8 @@ def _read_body(body: bytes, version: int) -> ParsedManifest:
             group_number=groups[i],
             window_size=windows[i],
             file_size=int(sizes[i]),
+            sha_hash=shas[i],
+            secret_guid=secret_guids[i],
         )
 
     # File manifest list
@@ -304,14 +313,21 @@ def _parse_json(data: bytes) -> ParsedManifest:
     dgl = payload.get("DataGroupList") or {}
 
     chunks: dict[str, ChunkInfo] = {}
+    sha_list = payload.get("ChunkShaList") or {}
     for guid_hex, size_blob in cfl.items():
         guid = _guid_from_json_hex(guid_hex)
+        sha_raw = sha_list.get(guid_hex, "")
+        if isinstance(sha_raw, str) and len(sha_raw) == 40:
+            sha_bytes = bytes.fromhex(sha_raw)
+        else:
+            sha_bytes = b""
         chunks[guid] = ChunkInfo(
             guid=guid,
             hash_hex=f"{_blob_to_int(chl.get(guid_hex, '0')):016X}",
             group_number=_blob_to_int(dgl.get(guid_hex, "0")),
             window_size=1024 * 1024,
             file_size=_blob_to_int(size_blob),
+            sha_hash=sha_bytes,
         )
 
     files: list[FileEntry] = []
@@ -362,6 +378,28 @@ def chunk_url(chunk: ChunkInfo, distribution_base_url: str, manifest_version: in
     directory = chunk_dir_for_version(manifest_version)
     group = f"{chunk.group_number:02d}"
     base = distribution_base_url.rstrip("/")
+    if manifest_version >= 22:
+        guid_parts = tuple(int(chunk.guid[i : i + 8], 16) for i in range(0, 32, 8))
+        hash_int = int(chunk.hash_hex, 16)
+        secret = chunk.secret_guid
+        guid_invalid = secret is None or secret == (0, 0, 0, 0)
+        if guid_invalid:
+            secret_part = "plain"
+        else:
+            secret_part = (
+                base64.urlsafe_b64encode(struct.pack("<IIII", *secret))
+                .decode("ascii")
+                .rstrip("=")
+            )
+        hash_b64 = (
+            base64.urlsafe_b64encode(struct.pack("<Q", hash_int)).decode("ascii").rstrip("=")
+        )
+        guid_b64 = (
+            base64.urlsafe_b64encode(struct.pack("<IIII", *guid_parts))
+            .decode("ascii")
+            .rstrip("=")
+        )
+        return f"{base}/{directory}/{secret_part}/{group}/{hash_b64}_{guid_b64}.chunk"
     return f"{base}/{directory}/{group}/{chunk.hash_hex}_{chunk.guid}.chunk"
 
 
@@ -370,15 +408,27 @@ def decode_chunk_payload(chunk_bytes: bytes) -> bytes:
     magic = reader.u32()
     if magic != CHUNK_MAGIC:
         raise ValueError(f"Bad chunk magic: 0x{magic:x}")
-    reader.u32()  # header version
+    header_version = reader.u32()
     header_size = reader.u32()
     reader.u32()  # compressed size
     reader.skip(16)  # guid
-    reader.skip(8)  # hash
+    reader.skip(8)  # rolling hash
     stored_as = reader.u8()
+    header_sha = b""
+    if header_version >= 2:
+        header_sha = reader.bytes(20)
+        reader.u8()  # hash_type
+    if header_version >= 3:
+        reader.u32()  # uncompressed_size
+    if header_version >= 4:
+        reader.skip(16)  # secret_guid
+        reader.skip(16)  # encryption_tag
     if stored_as & STORED_ENCRYPTED:
         raise ValueError("Encrypted chunks are not supported")
+    # Always trust the declared header size for payload offset.
     payload = chunk_bytes[header_size:]
     if stored_as & STORED_COMPRESSED:
-        return zlib.decompress(payload)
+        payload = zlib.decompress(payload)
+    if header_sha and sha1(payload).digest() != header_sha:
+        raise ValueError("Chunk header SHA1 mismatch")
     return payload

@@ -11,8 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .engines import EngineInstall
-from .epic.download import ProgressCb, download_asset
+from .epic.download import ProgressCb, download_asset, staging_is_complete
 from .epic.fab import FabAsset, FabError, prepare_download
+from .launch import clean_host_env
 from .projects import UProject
 
 PLUGIN_METHOD_HINTS = ("plugin", "code_plugin", "code plugin", "engine plugin")
@@ -51,18 +52,26 @@ def is_project_asset(asset: FabAsset) -> bool:
     return asset_kind(asset) == "project"
 
 
+def is_content_asset(asset: FabAsset) -> bool:
+    return asset_kind(asset) == "content"
+
+
 def filter_plugin_assets(assets: list[FabAsset]) -> list[FabAsset]:
-    """Owned code plugins + complete projects (installable from this tab)."""
+    """Owned Fab library items: plugins, complete projects, and content packs."""
     wanted_titles = (
         "blueprint assist",
         "auto size comments",
         "autosizecomments",
         "node graph assistant",
     )
+    kind_order = {"plugin": 0, "project": 1, "content": 2}
     out: list[FabAsset] = []
     seen: set[str] = set()
     for asset in assets:
-        include = is_plugin_asset(asset) or is_project_asset(asset)
+        kind = asset_kind(asset)
+        include = kind in ("plugin", "project", "content")
+        if kind == "engine":
+            include = False
         if not include and any(w in asset.title.lower() for w in wanted_titles):
             include = True
         if not include:
@@ -72,7 +81,7 @@ def filter_plugin_assets(assets: list[FabAsset]) -> list[FabAsset]:
             continue
         seen.add(key)
         out.append(asset)
-    out.sort(key=lambda a: (asset_kind(a) != "plugin", a.title.lower()))
+    out.sort(key=lambda a: (kind_order.get(asset_kind(a), 9), a.title.lower()))
     return out
 
 
@@ -207,8 +216,21 @@ def _stage_fab_download(
 ) -> Path:
     plan = prepare_download(asset, preferred_engine=preferred_engine)
     staging = cache_dir / f"fab_{asset.asset_id[:12]}"
+    if staging_is_complete(
+        staging, asset_id=asset.asset_id, artifact_id=plan.artifact_id
+    ):
+        if progress:
+            progress("Using cached download", 1, 1)
+        return staging
     if staging.exists():
-        shutil.rmtree(staging)
+        # Keep .chunks so a cancelled/partial download can resume.
+        for child in staging.iterdir():
+            if child.name == ".chunks":
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
     staging.mkdir(parents=True, exist_ok=True)
     download_asset(plan, staging, progress=progress)
     return staging
@@ -277,6 +299,133 @@ def install_fab_project(
         raise FabError(f"Project folder already exists: {dest}")
     shutil.copytree(source, dest)
     return dest / uproject.name
+
+
+def _content_payload_root(staging: Path) -> Path:
+    """Pick the folder whose children belong under a project's Content/ tree."""
+    contents = sorted(
+        (p for p in staging.rglob("Content") if p.is_dir()),
+        key=lambda p: len(p.parts),
+    )
+    if contents:
+        return contents[0]
+    return staging
+
+
+def _merge_tree(src: Path, dest: Path) -> None:
+    """Copy src into dest, merging directories (overwrite files)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    ignore = {"__macosx", ".ds_store", "intermediate", ".ue-launcher-asset.json"}
+    for child in src.iterdir():
+        if child.name.lower() in ignore or child.name.startswith("."):
+            continue
+        target = dest / child.name
+        if child.is_dir():
+            _merge_tree(child, target)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(child, target)
+
+
+def _has_world_partition_layout(root: Path) -> bool:
+    return (root / "__ExternalActors__").is_dir() or (root / "__ExternalObjects__").is_dir()
+
+
+def install_fab_content(
+    asset: FabAsset,
+    engine: EngineInstall,
+    project: UProject,
+    cache_dir: Path,
+    *,
+    progress: ProgressCb | None = None,
+) -> Path:
+    """Download Fab content and merge into the project's Content/ root.
+
+    World Partition maps require ``__ExternalActors__`` / ``__ExternalObjects__``
+    at Content root (and asset folders like RacingUIPro/ beside them). Nesting
+    under Content/Fab/<name>/ leaves maps empty in the editor.
+    """
+    staging = _stage_fab_download(
+        asset, engine.version_label, cache_dir, progress=progress
+    )
+    # Prefer plugin/project handlers if the pack actually contains those.
+    if _find_plugin_roots(staging):
+        return install_fab_plugin(
+            asset, engine, cache_dir, project=project, build_linux=False, progress=progress
+        )
+    if _find_uproject_roots(staging):
+        raise FabError(
+            f"{asset.title!r} looks like a complete project — use project install."
+        )
+
+    payload = _content_payload_root(staging)
+    content_root = project.directory / "Content"
+    content_root.mkdir(parents=True, exist_ok=True)
+
+    if payload.name == "Content":
+        source = payload
+    elif _has_world_partition_layout(payload) or any(
+        (payload / name).exists() for name in ("__ExternalActors__", "Maps", "Collections")
+    ):
+        source = payload
+    else:
+        # Loose pack without Content/ — keep a named folder so it stays findable.
+        safe = "".join(c if c.isalnum() or c in "-_ " else "" for c in asset.title).strip()
+        safe = "_".join(safe.split()) or f"FabContent_{asset.asset_id[:8]}"
+        dest = content_root / "Fab" / safe
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(
+            payload,
+            dest,
+            ignore=lambda _d, names: {
+                n for n in names if n.lower() in ("__macosx", ".ds_store", "intermediate")
+            },
+        )
+        return dest
+
+    if progress:
+        progress("Merging into project Content…", 0, 1)
+    _merge_tree(source, content_root)
+
+    # Remove a previous nested Fab/<name> install of the same pack if present.
+    safe = "".join(c if c.isalnum() or c in "-_ " else "" for c in asset.title).strip()
+    safe = "_".join(safe.split())
+    if safe:
+        nested = content_root / "Fab" / safe
+        if nested.is_dir() and _has_world_partition_layout(nested):
+            shutil.rmtree(nested, ignore_errors=True)
+            fab_dir = content_root / "Fab"
+            try:
+                if fab_dir.is_dir() and not any(fab_dir.iterdir()):
+                    fab_dir.rmdir()
+            except OSError:
+                pass
+
+    return content_root
+
+
+def repair_nested_fab_content(project: UProject) -> list[Path]:
+    """Move World Partition packs out of Content/Fab/<name>/ into Content/."""
+    fab_root = project.directory / "Content" / "Fab"
+    if not fab_root.is_dir():
+        return []
+    content_root = project.directory / "Content"
+    repaired: list[Path] = []
+    for child in list(fab_root.iterdir()):
+        if not child.is_dir():
+            continue
+        if not _has_world_partition_layout(child):
+            continue
+        _merge_tree(child, content_root)
+        shutil.rmtree(child, ignore_errors=True)
+        repaired.append(child)
+    try:
+        if fab_root.is_dir() and not any(fab_root.iterdir()):
+            fab_root.rmdir()
+    except OSError:
+        pass
+    return repaired
 
 
 def plugin_module_names(plugin_dir: Path) -> list[str]:
@@ -350,17 +499,7 @@ def build_plugin_linux(
         "-TargetPlatforms=Linux",
         "-HostPlatforms=Linux",
     ]
-    env = os.environ.copy()
-    # Avoid Cursor AppImage libs breaking the toolchain
-    ld = env.get("LD_LIBRARY_PATH", "")
-    if ld:
-        cleaned = ":".join(
-            p for p in ld.split(":") if p and "/tmp/.mount_cursor" not in p.lower()
-        )
-        if cleaned:
-            env["LD_LIBRARY_PATH"] = cleaned
-        else:
-            env.pop("LD_LIBRARY_PATH", None)
+    env = clean_host_env()
 
     proc = subprocess.run(
         cmd,

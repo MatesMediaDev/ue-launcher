@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .config import Config
 from .engines import EngineInstall
+from .launch import clean_host_env
 
 UPROJECT_RE = re.compile(r"\.uproject$", re.IGNORECASE)
 SAFE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -309,7 +310,9 @@ def import_project_from_git(
         cmd.extend(["--branch", branch.strip()])
     cmd.extend([url, str(dest)])
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, check=False, env=clean_host_env()
+    )
     if proc.returncode != 0:
         shutil.rmtree(dest, ignore_errors=True)
         detail = (proc.stderr or proc.stdout or "git clone failed").strip()

@@ -68,21 +68,32 @@ def _detect_vulkan_icd(configured: str | None) -> Path | None:
     return _first_existing(_RADV_ICD_CANDIDATES)
 
 
-def build_env(config: Config, base: dict[str, str] | None = None) -> dict[str, str]:
-    env = dict(base if base is not None else os.environ)
+def clean_host_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for host tools (bash, RunUAT, git).
 
-    # Editor must use the host GPU stack — never inherit AppImage lib paths.
-    env.pop("LD_LIBRARY_PATH", None)
-    env.pop("PYTHONPATH", None)
-    env.pop("PYTHONHOME", None)
-    env.pop("GI_TYPELIB_PATH", None)
-    env.pop("GSETTINGS_SCHEMA_DIR", None)
-    env.pop("GDK_PIXBUF_MODULEDIR", None)
-    env.pop("GDK_PIXBUF_MODULE_FILE", None)
-    env.pop("APPDIR", None)
-    env.pop("APPIMAGE", None)
-    env.pop("OWD", None)
-    env.pop("ARGV0", None)
+    AppImage sets LD_LIBRARY_PATH to bundled libs (e.g. readline). Host /bin/bash
+    then fails with ``undefined symbol: rl_print_keybinding`` when UAT scripts run.
+    """
+    env = dict(base if base is not None else os.environ)
+    for key in (
+        "LD_LIBRARY_PATH",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "GI_TYPELIB_PATH",
+        "GSETTINGS_SCHEMA_DIR",
+        "GDK_PIXBUF_MODULEDIR",
+        "GDK_PIXBUF_MODULE_FILE",
+        "APPDIR",
+        "APPIMAGE",
+        "OWD",
+        "ARGV0",
+    ):
+        env.pop(key, None)
+    return env
+
+
+def build_env(config: Config, base: dict[str, str] | None = None) -> dict[str, str]:
+    env = clean_host_env(base)
 
     if config.get("prefer_x11", True):
         env.setdefault("QT_QPA_PLATFORM", "xcb")
@@ -100,9 +111,18 @@ def build_env(config: Config, base: dict[str, str] | None = None) -> dict[str, s
     icd = _detect_vulkan_icd(str(configured) if configured else None)
     if icd is not None:
         env["VK_ICD_FILENAMES"] = str(icd)
+        # Prefer NVIDIA GLX vendor only — do not force DRI_PRIME (hybrid AMD+NVIDIA
+        # hangs are common when PRIME is forced under Wayland/XWayland).
         if "nvidia" in icd.name.lower():
             env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
-            env.setdefault("DRI_PRIME", "1")
+
+    # Reduce Wayland/XWayland relative-mouse + present stalls that look like freezes.
+    env.setdefault("SDL_MOUSE_RELATIVE_MODE_WARP_MOTION", "1")
+    env.setdefault("SDL_VIDEO_X11_DGAMOUSE", "0")
+    # First click both focuses the window AND reaches Slate (Play/Stop/maps).
+    # Without this, Wayland/XWayland often eats the activate click.
+    env.setdefault("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1")
+    env.setdefault("GDK_BACKEND", "x11")
 
     return env
 
