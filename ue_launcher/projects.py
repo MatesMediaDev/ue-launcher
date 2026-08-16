@@ -37,6 +37,27 @@ class UProject:
         return self.path.parent
 
 
+def project_thumbnail_path(project: UProject) -> Path | None:
+    """Best local image for a project row (editor AutoScreenshot, then common fallbacks)."""
+    root = project.directory
+    candidates = [
+        root / "Saved" / "AutoScreenshot.png",
+        root / "Build" / "Linux" / "Application.png",
+        root / "Build" / "Linux" / "Resources" / "Icon.png",
+        root / "Content" / "Splash" / "Splash.png",
+    ]
+    for path in candidates:
+        if path.is_file() and path.stat().st_size > 64:
+            return path
+    shots = root / "Saved" / "Screenshots"
+    if shots.is_dir():
+        pngs = sorted(shots.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in pngs[:8]:
+            if path.stat().st_size > 64:
+                return path
+    return None
+
+
 @dataclass(frozen=True)
 class TemplateInfo:
     path: Path

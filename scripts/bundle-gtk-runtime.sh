@@ -239,6 +239,7 @@ for theme in Adwaita hicolor; do
     fi
     # index.theme required
     [[ -f "${src}/index.theme" ]] && cp -a "${src}/index.theme" "${APPDIR}/usr/share/icons/${theme}/"
+    [[ -f "${src}/icon-theme.cache" ]] && cp -a "${src}/icon-theme.cache" "${APPDIR}/usr/share/icons/${theme}/" 2>/dev/null || true
     # common sizes used by GTK
     for sz in 16x16 22x22 24x24 32x32 48x48; do
       if [[ -d "${src}/${sz}" ]]; then

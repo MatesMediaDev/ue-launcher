@@ -153,5 +153,6 @@ def launch_editor(
 
 def open_in_file_manager(path: Path) -> None:
     path = path.expanduser()
+    env = clean_host_env()
     if shutil.which("xdg-open"):
-        subprocess.Popen(["xdg-open", str(path)], start_new_session=True)
+        subprocess.Popen(["xdg-open", str(path)], env=env, start_new_session=True)

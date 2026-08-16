@@ -94,11 +94,19 @@ slim_appdir() {
   local appdir="$1"
   # GTK emoji data unused by this app (~6 MiB)
   rm -rf "${appdir}/usr/share/gtk-4.0/emoji" 2>/dev/null || true
-  # Prefer symbolic-only Adwaita; drop huge scalable trees if present
-  rm -rf "${appdir}/usr/share/icons/Adwaita/scalable" 2>/dev/null || true
-  find "${appdir}/usr/share/icons/Adwaita" -type d -name '64x64' -prune -exec rm -rf {} + 2>/dev/null || true
-  find "${appdir}/usr/share/icons/Adwaita" -type d -name '96x96' -prune -exec rm -rf {} + 2>/dev/null || true
-  find "${appdir}/usr/share/icons/Adwaita" -type d -name '256x256' -prune -exec rm -rf {} + 2>/dev/null || true
+  # Keep Adwaita symbolic + scalable SVGs (Steam Deck/KDE needs them).
+  # Drop only bulky bitmap sizes we don't use.
+  find "${appdir}/usr/share/icons/Adwaita" -type d \( \
+    -name '64x64' -o -name '96x96' -o -name '256x256' -o -name '512x512' \
+  \) -prune -exec rm -rf {} + 2>/dev/null || true
+  rm -rf \
+    "${appdir}/usr/share/icons/Adwaita/scalable/emotes" \
+    "${appdir}/usr/share/icons/Adwaita/symbolic/emotes" \
+    2>/dev/null || true
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f "${appdir}/usr/share/icons/Adwaita" 2>/dev/null || true
+    gtk-update-icon-cache -f "${appdir}/usr/share/icons/hicolor" 2>/dev/null || true
+  fi
   # Python stdlib we never import
   if [[ -f "${appdir}/usr/pyversion" ]]; then
     local pyv

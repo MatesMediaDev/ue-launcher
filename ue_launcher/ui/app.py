@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -49,6 +50,7 @@ from ..projects import (
     guess_repo_folder_name,
     import_project_from_git,
     list_templates,
+    project_thumbnail_path,
 )
 from ..thumbnails import cached_thumbnail, fetch_thumbnail
 
@@ -92,6 +94,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         self._installing_plugin = False
         self._plugin_search_query = ""
         self._plugin_textures: dict[str, Gdk.Texture] = {}
+        self._project_textures: dict[str, Gdk.Texture] = {}
         self._plugin_search_timeout_id: int = 0
 
     def do_startup(self) -> None:  # noqa: N802
@@ -126,6 +129,33 @@ class MatesUnrealLauncherApp(Adw.Application):
                 provider,
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
             )
+            self._setup_icon_theme(display)
+
+    def _setup_icon_theme(self, display: Gdk.Display) -> None:
+        """Prefer bundled Adwaita so Steam Deck / KDE doesn't substitute random icons."""
+        theme = Gtk.IconTheme.get_for_display(display)
+        search: list[str] = []
+        appdir = os.environ.get("APPDIR")
+        if not appdir:
+            # site-packages/ue_launcher → usr/lib/python3 → usr → AppDir
+            guessed = Path(__file__).resolve().parents[4]
+            if (guessed / "usr" / "share" / "icons").is_dir():
+                appdir = str(guessed)
+        if appdir:
+            bundled = Path(appdir) / "usr" / "share" / "icons"
+            if bundled.is_dir():
+                search.append(str(bundled))
+        if branding.ICONS_HICOLOR.parent.is_dir():
+            search.append(str(branding.ICONS_HICOLOR.parent))
+        host = Path("/usr/share/icons")
+        if host.is_dir():
+            search.append(str(host))
+        for path in search:
+            theme.add_search_path(path)
+        try:
+            theme.set_theme_name("Adwaita")
+        except (GLib.Error, AttributeError):
+            pass
 
     def _brand_mark_widget(self, size: int = 22) -> Gtk.Widget | None:
         path = branding.mark_path()
@@ -189,6 +219,9 @@ class MatesUnrealLauncherApp(Adw.Application):
         refresh_btn.set_tooltip_text("Rescan")
         refresh_btn.add_css_class("flat")
         refresh_btn.connect("clicked", lambda *_: self.refresh_all())
+        mark = self._brand_mark_widget(22)
+        if mark is not None:
+            header.pack_start(mark)
         header.pack_start(refresh_btn)
 
         account_menu = Gio.Menu()
@@ -211,7 +244,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         header.set_title_widget(switcher)
 
         stack.add_titled_with_icon(
-            self._build_engines_page(), "engines", "Engines", "applications-games-symbolic"
+            self._build_engines_page(), "engines", "Engines", "system-run-symbolic"
         )
         stack.add_titled_with_icon(
             self._build_projects_page(), "projects", "Projects", "folder-symbolic"
@@ -559,8 +592,12 @@ class MatesUnrealLauncherApp(Adw.Application):
             row.project = proj  # type: ignore[attr-defined]
 
             open_btn = self._flat_btn(
-                icon="document-open-symbolic",
+                icon="media-playback-start-symbolic",
                 tooltip=f"Open {proj.name}",
+            )
+            folder_btn = self._flat_btn(
+                icon="folder-symbolic",
+                tooltip="Show project folder",
             )
 
             def _open(_btn: Gtk.Button, project: UProject = proj) -> None:
@@ -571,9 +608,40 @@ class MatesUnrealLauncherApp(Adw.Application):
                         break
                 self._open_selected_project()
 
+            def _folder(_btn: Gtk.Button, project: UProject = proj) -> None:
+                open_in_file_manager(project.directory)
+
             open_btn.connect("clicked", _open)
+            folder_btn.connect("clicked", _folder)
+            row.add_suffix(folder_btn)
             row.add_suffix(open_btn)
+
+            thumb = Gtk.Image.new_from_icon_name("folder-symbolic")
+            thumb.set_pixel_size(40)
+            thumb.set_valign(Gtk.Align.CENTER)
+            thumb.add_css_class("mates-project-icon")
+            row.add_prefix(thumb)
+            self._bind_project_icon(thumb, proj)
             self.project_list.append(row)
+
+    def _bind_project_icon(self, image: Gtk.Image, project: UProject) -> None:
+        key = str(project.path)
+        cached = self._project_textures.get(key)
+        if cached is not None:
+            image.set_from_paintable(cached)
+            return
+        path = project_thumbnail_path(project)
+        if path is None:
+            mark = branding.mark_path()
+            path = mark if mark is not None else None
+        if path is None:
+            return
+        try:
+            texture = Gdk.Texture.new_from_filename(str(path))
+        except GLib.Error:
+            return
+        self._project_textures[key] = texture
+        image.set_from_paintable(texture)
 
     def _populate_plugin_engine_dropdown(self) -> None:
         if not self.plugin_engine_dropdown:

@@ -58,6 +58,9 @@ fi
 if [[ -d "${HERE}/usr/share" ]]; then
   export XDG_DATA_DIRS="${HERE}/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
 fi
+# Force Adwaita so KDE/Steam Deck Breeze doesn't replace toolbar icons
+export GTK_ICON_THEME_NAME="${GTK_ICON_THEME_NAME:-Adwaita}"
+export ADW_DISABLE_PORTAL=1
 if [[ -d "${HERE}/usr/share/glib-2.0/schemas" ]]; then
   export GSETTINGS_SCHEMA_DIR="${HERE}/usr/share/glib-2.0/schemas"
 fi

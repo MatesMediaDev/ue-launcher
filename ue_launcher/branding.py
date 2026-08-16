@@ -78,7 +78,8 @@ def css() -> str:
       opacity: 0.95;
     }}
 
-    .mates-plugin-icon {{
+    .mates-plugin-icon,
+    .mates-project-icon {{
       margin-end: 8px;
       min-width: 40px;
       min-height: 40px;
