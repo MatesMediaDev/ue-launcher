@@ -97,6 +97,12 @@ def css() -> str:
       padding-right: 10px;
     }}
 
+    button.mates-header-action {{
+      min-height: 32px;
+      padding-left: 10px;
+      padding-right: 12px;
+    }}
+
     /* Install actions stay visible — hover-only opacity felt like double-click */
     button.mates-install-btn {{
       opacity: 0.85;

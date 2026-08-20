@@ -278,27 +278,15 @@ else
   build_portable
 fi
 
-cp "${ROOT}/packaging/appimage/Unreal_Launcher.sh" "${DIST}/Unreal_Launcher.sh"
-chmod +x "${DIST}/Unreal_Launcher.sh"
-
 OUT="${DIST}/${APPIMAGE_NAME}"
-
-# Single-file Deck launcher (no FUSE): shell stub + embedded AppImage
-RUN="${DIST}/Unreal_Launcher-${ARCH}.run"
-{
-  cat "${ROOT}/packaging/appimage/Unreal_Launcher.sh"
-  printf '\n__APPIMAGE_BELOW__\n'
-  cat "${OUT}"
-} > "${RUN}"
-chmod +x "${RUN}"
+# Drop legacy FUSE-free .run stubs if a previous build left them around.
+rm -f "${DIST}/Unreal_Launcher-${ARCH}.run" "${DIST}/Unreal_Launcher.sh"
 
 echo
 echo "Built: ${OUT}"
-echo "Deck/Discord share this instead (FUSE-free): ${RUN}"
-ls -lh "${OUT}" "${RUN}" "${DIST}/Unreal_Launcher.sh"
+ls -lh "${OUT}"
 echo
-echo "Steam Deck:"
-echo "  chmod +x Unreal_Launcher-x86_64.run"
-echo "  ./Unreal_Launcher-x86_64.run"
-echo "Or: APPIMAGE_EXTRACT_AND_RUN=1 ./Unreal_Launcher-x86_64.AppImage"
+echo "Steam Deck / no FUSE:"
+echo "  chmod +x ${APPIMAGE_NAME}"
+echo "  APPIMAGE_EXTRACT_AND_RUN=1 ./${APPIMAGE_NAME}"
 echo "Log: ~/.cache/mates-unreal-launcher/appimage.log"

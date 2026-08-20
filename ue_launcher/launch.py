@@ -95,9 +95,20 @@ def clean_host_env(base: dict[str, str] | None = None) -> dict[str, str]:
 def build_env(config: Config, base: dict[str, str] | None = None) -> dict[str, str]:
     env = clean_host_env(base)
 
-    if config.get("prefer_x11", True):
-        env.setdefault("QT_QPA_PLATFORM", "xcb")
-        env.setdefault("SDL_VIDEODRIVER", "x11")
+    prefer_x11 = bool(config.get("prefer_x11", True))
+    if prefer_x11:
+        # Force X11 — setdefault loses on Deck/Steam when SDL_VIDEODRIVER=wayland
+        # is already set (color picker and other Slate dialogs break on Wayland).
+        env["SDL_VIDEODRIVER"] = "x11"
+        env["QT_QPA_PLATFORM"] = "xcb"
+        env["GDK_BACKEND"] = "x11"
+        # Stay on XWayland via DISPLAY; don't let SDL pick native Wayland.
+        for key in (
+            "WAYLAND_DISPLAY",
+            "WAYLAND_SOCKET",
+            "GAMESCOPE_WAYLAND_DISPLAY",
+        ):
+            env.pop(key, None)
 
     # Drop any inherited ICD / layer overrides from a bad shell or launcher.
     env.pop("VK_ICD_FILENAMES", None)
@@ -122,9 +133,31 @@ def build_env(config: Config, base: dict[str, str] | None = None) -> dict[str, s
     # First click both focuses the window AND reaches Slate (Play/Stop/maps).
     # Without this, Wayland/XWayland often eats the activate click.
     env.setdefault("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1")
-    env.setdefault("GDK_BACKEND", "x11")
 
     return env
+
+
+def editor_launch_args(config: Config, extra_args: list[str] | None = None) -> list[str]:
+    """CLI flags for UnrealEditor (Slate workarounds on Linux Wayland / Deck)."""
+    args: list[str] = []
+    exec_cmds: list[str] = []
+    if config.get("slate_disable_tooltips", True):
+        exec_cmds.append("Slate.EnableTooltips 0")
+    else:
+        delay = config.get("slate_tooltip_delay", 4.0)
+        try:
+            delay_f = float(delay)
+        except (TypeError, ValueError):
+            delay_f = 0.0
+        if delay_f > 0:
+            exec_cmds.append(f"Slate.TooltipSummonDelay {delay_f:g}")
+    if config.get("slate_disable_notifications", True):
+        exec_cmds.append("Slate.bAllowNotifications 0")
+    if exec_cmds:
+        args.append(f'-ExecCmds={"; ".join(exec_cmds)}')
+    if extra_args:
+        args.extend(extra_args)
+    return args
 
 
 def launch_editor(
@@ -136,8 +169,7 @@ def launch_editor(
     cmd = [str(engine.editor)]
     if project is not None:
         cmd.append(str(Path(project).expanduser().resolve()))
-    if extra_args:
-        cmd.extend(extra_args)
+    cmd.extend(editor_launch_args(config, extra_args))
 
     env = build_env(config)
     # Detach from launcher so closing the UI doesn't kill the editor

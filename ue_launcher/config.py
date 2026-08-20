@@ -50,6 +50,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Empty = auto-detect (NVIDIA ICD if present, else RADV). Never force NVIDIA on Deck/AMD.
     "vulkan_icd": "",
     "prefer_x11": True,
+    # UE 5.7 + Wayland: Slate tooltips are separate windows and eat the first click.
+    "slate_disable_tooltips": True,
+    # When tooltips stay on (slate_disable_tooltips false), delay before they appear (seconds).
+    # Long delay (e.g. 4) often avoids the first-click steal while still allowing Blueprint pin help.
+    "slate_tooltip_delay": 4.0,
+    "slate_disable_notifications": True,
 }
 
 

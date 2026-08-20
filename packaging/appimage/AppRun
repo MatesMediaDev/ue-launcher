@@ -104,7 +104,6 @@ if ! "${PY}" -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version(
 
 This build should bundle them. If you see this on Deck, run with:
   APPIMAGE_EXTRACT_AND_RUN=1 ./Unreal_Launcher-x86_64.AppImage
-or share/use Unreal_Launcher-x86_64.run instead.
 
 Fedora/Bazzite fallback:
   sudo dnf install python3-gobject libadwaita gtk4
@@ -127,11 +126,8 @@ set -e
 if [[ "$rc" -ne 0 ]]; then
   die "Unreal Launcher crashed (exit $rc).
 
-Steam Deck (no FUSE):
-  chmod +x Unreal_Launcher-x86_64.run
-  ./Unreal_Launcher-x86_64.run
-
-Or:
+Steam Deck / no FUSE:
+  chmod +x Unreal_Launcher-x86_64.AppImage
   APPIMAGE_EXTRACT_AND_RUN=1 ./Unreal_Launcher-x86_64.AppImage
 
 Log: $LOG"

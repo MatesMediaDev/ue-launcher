@@ -40,15 +40,16 @@ chmod +x scripts/build-appimage.sh
 ./scripts/build-appimage.sh
 ```
 
-Outputs (~42 MiB, under typical Discord limits):
+Output (~43 MiB):
 
 - `dist/Unreal_Launcher-x86_64.AppImage` — portable build (Ubuntu 24.04 + GTK stack + Python)
-- `dist/Unreal_Launcher-x86_64.run` — same payload with a FUSE-free wrapper (handy on Deck)
 
 ```bash
 chmod +x Unreal_Launcher-x86_64.AppImage
 APPIMAGE_EXTRACT_AND_RUN=1 ./Unreal_Launcher-x86_64.AppImage
 ```
+
+On Steam Deck (or any host without FUSE), keep `APPIMAGE_EXTRACT_AND_RUN=1`.
 
 If it fails, check `~/.cache/mates-unreal-launcher/appimage.log`.
 

@@ -196,6 +196,21 @@ class MatesUnrealLauncherApp(Adw.Application):
             btn.set_tooltip_text(tooltip)
         return btn
 
+    def _header_action_btn(self, label: str, icon: str, tooltip: str) -> Gtk.Button:
+        """Compact icon + label control for section headers (Deck-friendly hit target)."""
+        btn = Gtk.Button()
+        btn.add_css_class("flat")
+        btn.add_css_class("mates-header-action")
+        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        img = Gtk.Image.new_from_icon_name(icon)
+        img.set_pixel_size(16)
+        caption = Gtk.Label(label=label)
+        inner.append(img)
+        inner.append(caption)
+        btn.set_child(inner)
+        btn.set_tooltip_text(tooltip)
+        return btn
+
     def do_activate(self) -> None:  # noqa: N802
         if self.window:
             self.window.present()
@@ -331,13 +346,24 @@ class MatesUnrealLauncherApp(Adw.Application):
         box.set_margin_end(14)
         box.add_css_class("mates-panel")
 
-        new_btn = self._flat_btn(label="New", tooltip="Create from template")
+        new_btn = self._header_action_btn(
+            "New", "list-add-symbolic", "Create a project from a template"
+        )
         new_btn.connect("clicked", lambda *_: self._new_project_dialog())
-        git_btn = self._flat_btn(label="Git", tooltip="Import project from git")
+        git_btn = self._header_action_btn(
+            "Git", "folder-download-symbolic", "Clone a project from git"
+        )
         git_btn.connect("clicked", lambda *_: self._import_git_project_dialog())
-        browse_btn = self._flat_btn(label="Browse", tooltip="Open a .uproject")
+        browse_btn = self._header_action_btn(
+            "Browse", "folder-open-symbolic", "Open a .uproject on disk"
+        )
         browse_btn.connect("clicked", lambda *_: self._browse_project())
-        box.append(self._section_header("Projects", new_btn, git_btn, browse_btn))
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        actions.add_css_class("linked")
+        actions.append(new_btn)
+        actions.append(git_btn)
+        actions.append(browse_btn)
+        box.append(self._section_header("Projects", actions))
 
         scrolled = Gtk.ScrolledWindow(vexpand=True)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
