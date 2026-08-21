@@ -15,7 +15,7 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
 
-from .. import branding
+from .. import branding, icons
 from ..config import APP_ID, APP_NAME, Config
 from ..engines import EngineInstall, discover_engines, pick_engine
 from ..epic import (
@@ -87,10 +87,15 @@ class MatesUnrealLauncherApp(Adw.Application):
         self.plugin_store: Gio.ListStore | None = None
         self.plugin_selection: Gtk.SingleSelection | None = None
         self.plugin_engine_dropdown: Gtk.DropDown | None = None
-        self.plugin_search: Gtk.SearchEntry | None = None
+        self.settings_group: Adw.PreferencesGroup | None = None
+        self.preferred_engine_row: Adw.PreferencesRow | None = None
+        self._syncing_preferred_engine = False
+        self.plugin_search: Gtk.Entry | None = None
         self.account_btn: Gtk.MenuButton | None = None
+        self.view_stack: Adw.ViewStack | None = None
         self.toast_overlay: Adw.ToastOverlay | None = None
         self._installing_engine = False
+        self._removing_engine = False
         self._installing_plugin = False
         self._plugin_search_query = ""
         self._plugin_textures: dict[str, Gdk.Texture] = {}
@@ -132,9 +137,12 @@ class MatesUnrealLauncherApp(Adw.Application):
             self._setup_icon_theme(display)
 
     def _setup_icon_theme(self, display: Gdk.Display) -> None:
-        """Prefer bundled Adwaita so Steam Deck / KDE doesn't substitute random icons."""
+        """Prefer bundled Lucide + Adwaita so Steam Deck / KDE doesn't substitute random icons."""
         theme = Gtk.IconTheme.get_for_display(display)
         search: list[str] = []
+        # Lucide icons shipped with the app (first so mates-* names resolve reliably).
+        if icons.ICONS_DIR.is_dir():
+            search.append(str(icons.ICONS_DIR))
         appdir = os.environ.get("APPDIR")
         if not appdir:
             # site-packages/ue_launcher → usr/lib/python3 → usr → AppDir
@@ -152,10 +160,57 @@ class MatesUnrealLauncherApp(Adw.Application):
             search.append(str(host))
         for path in search:
             theme.add_search_path(path)
+
+    def _icon_paintable(self, name: str, size: int = 16) -> Gdk.Paintable | None:
+        display = Gdk.Display.get_default()
+        if display is None:
+            return None
+        theme = Gtk.IconTheme.get_for_display(display)
+        if not theme.has_icon(name):
+            return None
         try:
-            theme.set_theme_name("Adwaita")
-        except (GLib.Error, AttributeError):
-            pass
+            return theme.lookup_icon(
+                name,
+                None,
+                size,
+                1,
+                Gtk.TextDirection.NONE,
+                Gtk.IconLookupFlags(0),
+            )
+        except GLib.Error:
+            return None
+
+    def _set_icon_on_image(self, image: Gtk.Image, name: str, size: int) -> None:
+        png = icons.png_path(name, size)
+        if png is not None:
+            try:
+                gicon = Gio.FileIcon.new(Gio.File.new_for_path(str(png)))
+                image.set_from_gicon(gicon)
+                image.set_pixel_size(size)
+                image.add_css_class(f"mates-icon-{size}")
+                return
+            except (GLib.Error, TypeError, AttributeError):
+                try:
+                    texture = Gdk.Texture.new_from_filename(str(png))
+                    image.set_from_paintable(texture)
+                    image.set_pixel_size(size)
+                    image.add_css_class(f"mates-icon-{size}")
+                    return
+                except GLib.Error:
+                    pass
+        paintable = self._icon_paintable(name, size)
+        if paintable is not None:
+            image.set_from_paintable(paintable)
+            image.set_pixel_size(size)
+            image.add_css_class(f"mates-icon-{size}")
+
+    def _icon_image(self, name: str, size: int = 16, tooltip: str = "") -> Gtk.Image:
+        image = Gtk.Image()
+        image.set_valign(Gtk.Align.CENTER)
+        self._set_icon_on_image(image, name, size)
+        if tooltip:
+            image.set_tooltip_text(tooltip)
+        return image
 
     def _brand_mark_widget(self, size: int = 22) -> Gtk.Widget | None:
         path = branding.mark_path()
@@ -173,6 +228,18 @@ class MatesUnrealLauncherApp(Adw.Application):
         image.set_tooltip_text(APP_NAME)
         return image
 
+    def _add_row_actions(self, row: Adw.ActionRow, *buttons: Gtk.Widget) -> None:
+        """Push row action buttons to the trailing edge of the row."""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        box.set_hexpand(True)
+        box.set_halign(Gtk.Align.END)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        box.append(spacer)
+        for btn in buttons:
+            box.append(btn)
+        row.add_suffix(box)
+
     def _section_header(self, title: str, *trailing: Gtk.Widget) -> Gtk.Widget:
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         label = Gtk.Label(label=title, xalign=0)
@@ -183,33 +250,75 @@ class MatesUnrealLauncherApp(Adw.Application):
             row.append(widget)
         return row
 
-    def _flat_btn(self, label: str | None = None, icon: str | None = None, tooltip: str = "") -> Gtk.Button:
-        if icon and not label:
-            btn = Gtk.Button(icon_name=icon)
-        else:
-            btn = Gtk.Button(label=label or "")
-            if icon:
-                btn.set_icon_name(icon)
+    def _flat_btn(self, icon: str, tooltip: str = "") -> Gtk.Button:
+        """Icon-only flat button; tooltip carries the accessible name."""
+        btn = Gtk.Button()
+        btn.set_child(self._icon_image(icon, 16))
         btn.add_css_class("flat")
         btn.add_css_class("mates-row-btn")
         if tooltip:
             btn.set_tooltip_text(tooltip)
         return btn
 
-    def _header_action_btn(self, label: str, icon: str, tooltip: str) -> Gtk.Button:
-        """Compact icon + label control for section headers (Deck-friendly hit target)."""
-        btn = Gtk.Button()
-        btn.add_css_class("flat")
+    def _header_action_btn(self, icon: str, tooltip: str) -> Gtk.Button:
+        """Compact icon-only header control (Deck-friendly hit target + tooltip)."""
+        btn = self._flat_btn(icon=icon, tooltip=tooltip)
         btn.add_css_class("mates-header-action")
-        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        img = Gtk.Image.new_from_icon_name(icon)
-        img.set_pixel_size(16)
-        caption = Gtk.Label(label=label)
-        inner.append(img)
-        inner.append(caption)
-        btn.set_child(inner)
-        btn.set_tooltip_text(tooltip)
         return btn
+
+    def _view_tab_button(
+        self,
+        group: Gtk.ToggleButton | None,
+        name: str,
+        title: str,
+        icon: str,
+    ) -> Gtk.ToggleButton:
+        """Tab toggle with Lucide PNG icon (ViewSwitcher icon theme lookup is unreliable)."""
+        btn = Gtk.ToggleButton()
+        btn.add_css_class("flat")
+        btn.add_css_class("mates-view-tab")
+        if group is not None:
+            btn.set_group(group)
+        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        inner.append(self._icon_image(icon, 16))
+        inner.append(Gtk.Label(label=title))
+        btn.set_child(inner)
+        btn.set_tooltip_text(title)
+
+        def _on_toggled(toggle: Gtk.ToggleButton) -> None:
+            if not toggle.get_active() or self.view_stack is None:
+                return
+            self.view_stack.set_visible_child_name(name)
+
+        btn.connect("toggled", _on_toggled)
+        return btn
+
+    def _add_view_page(
+        self,
+        stack: Adw.ViewStack,
+        tab_bar: Gtk.Box,
+        tab_group: Gtk.ToggleButton | None,
+        name: str,
+        title: str,
+        icon: str,
+        page: Gtk.Widget,
+    ) -> Gtk.ToggleButton:
+        stack.add_titled(page, name, title)
+        btn = self._view_tab_button(tab_group, name, title, icon)
+        tab_bar.append(btn)
+        return btn
+
+    def _menu_item(self, label: str, action: str, icon: str) -> Gio.MenuItem:
+        item = Gio.MenuItem.new(label, action)
+        png = icons.png_path(icon, 16)
+        if png is not None:
+            item.set_icon(Gio.FileIcon.new(Gio.File.new_for_path(str(png))))
+        else:
+            item.set_icon(Gio.ThemedIcon.new(icon))
+        return item
+
+    def _status_icon(self, icon: str, tooltip: str, size: int = 16) -> Gtk.Image:
+        return self._icon_image(icon, size, tooltip=tooltip)
 
     def do_activate(self) -> None:  # noqa: N802
         if self.window:
@@ -230,48 +339,89 @@ class MatesUnrealLauncherApp(Adw.Application):
         header = Adw.HeaderBar()
         header.add_css_class("flat")
 
-        refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
-        refresh_btn.set_tooltip_text("Rescan")
-        refresh_btn.add_css_class("flat")
+        refresh_btn = self._flat_btn(icons.REFRESH, "Rescan engines & projects")
         refresh_btn.connect("clicked", lambda *_: self.refresh_all())
-        mark = self._brand_mark_widget(22)
+
+        start_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        start_box.add_css_class("mates-header-start")
+        start_box.set_margin_start(16)
+        start_box.set_margin_end(4)
+        mark = self._brand_mark_widget(20)
         if mark is not None:
-            header.pack_start(mark)
-        header.pack_start(refresh_btn)
+            mark_wrap = Gtk.Box()
+            mark_wrap.add_css_class("mates-header-mark")
+            mark_wrap.append(mark)
+            start_box.append(mark_wrap)
+        start_box.append(refresh_btn)
+        header.pack_start(start_box)
 
         account_menu = Gio.Menu()
-        account_menu.append("Sign in with Epic", "app.sign-in")
-        account_menu.append("Sign out", "app.sign-out")
-        account_menu.append("Refresh catalog", "app.refresh-catalog")
-        account_menu.append("Refresh plugins", "app.refresh-plugins")
-        account_menu.append("Open in browser", "app.open-downloads")
+        account_menu.append_item(self._menu_item("Sign in with Epic", "app.sign-in", icons.LOGIN))
+        account_menu.append_item(self._menu_item("Sign out", "app.sign-out", icons.LOGOUT))
+        account_menu.append_item(
+            self._menu_item("Refresh catalog", "app.refresh-catalog", icons.REFRESH)
+        )
+        account_menu.append_item(
+            self._menu_item("Refresh plugins", "app.refresh-plugins", icons.PLUGIN)
+        )
+        account_menu.append_item(
+            self._menu_item("Open in browser", "app.open-downloads", icons.EXTERNAL)
+        )
 
-        self.account_btn = Gtk.MenuButton(label="Account")
+        self.account_btn = Gtk.MenuButton()
+        self.account_btn.set_child(self._icon_image(icons.ACCOUNT, 16, tooltip="Account"))
         self.account_btn.set_menu_model(account_menu)
-        self.account_btn.set_always_show_arrow(True)
+        self.account_btn.set_always_show_arrow(False)
         self.account_btn.add_css_class("flat")
         header.pack_end(self.account_btn)
 
         toolbar.add_top_bar(header)
 
-        stack = Adw.ViewStack()
-        switcher = Adw.ViewSwitcher(stack=stack, policy=Adw.ViewSwitcherPolicy.WIDE)
-        header.set_title_widget(switcher)
+        self.view_stack = Adw.ViewStack()
+        tab_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        tab_bar.add_css_class("linked")
 
-        stack.add_titled_with_icon(
-            self._build_engines_page(), "engines", "Engines", "system-run-symbolic"
+        tab_group: Gtk.ToggleButton | None = None
+        tab_group = self._add_view_page(
+            self.view_stack,
+            tab_bar,
+            tab_group,
+            "engines",
+            "Engines",
+            icons.ENGINES,
+            self._build_engines_page(),
         )
-        stack.add_titled_with_icon(
-            self._build_projects_page(), "projects", "Projects", "folder-symbolic"
+        tab_group.set_active(True)
+        self._add_view_page(
+            self.view_stack,
+            tab_bar,
+            tab_group,
+            "projects",
+            "Projects",
+            icons.FOLDER,
+            self._build_projects_page(),
         )
-        stack.add_titled_with_icon(
-            self._build_plugins_page(), "plugins", "Library", "application-x-addon-symbolic"
+        self._add_view_page(
+            self.view_stack,
+            tab_bar,
+            tab_group,
+            "plugins",
+            "Library",
+            icons.LIBRARY,
+            self._build_plugins_page(),
         )
-        stack.add_titled_with_icon(
-            self._build_settings_page(), "settings", "Settings", "preferences-system-symbolic"
+        self._add_view_page(
+            self.view_stack,
+            tab_bar,
+            tab_group,
+            "settings",
+            "Settings",
+            icons.SETTINGS,
+            self._build_settings_page(),
         )
 
-        toolbar.set_content(stack)
+        header.set_title_widget(tab_bar)
+        toolbar.set_content(self.view_stack)
 
         self.status = Gtk.Label(label="Ready", xalign=0)
         self.status.add_css_class("dim-label")
@@ -318,7 +468,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         right.set_size_request(320, -1)
 
         refresh_avail = self._flat_btn(
-            icon="view-refresh-symbolic", tooltip="Refresh available builds"
+            icon=icons.REFRESH, tooltip="Refresh available builds"
         )
         refresh_avail.connect("clicked", lambda *_: self._load_engine_blobs_async())
         right.append(self._section_header("Available", refresh_avail))
@@ -330,7 +480,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         self.engine_download_list.set_activate_on_single_click(True)
         self.engine_download_list.connect(
             "row-activated",
-            lambda *_: self._install_selected_blob(),
+            lambda *_: self._confirm_install_selected_blob(),
         )
         dl_scrolled.set_child(self.engine_download_list)
         right.append(dl_scrolled)
@@ -347,15 +497,15 @@ class MatesUnrealLauncherApp(Adw.Application):
         box.add_css_class("mates-panel")
 
         new_btn = self._header_action_btn(
-            "New", "list-add-symbolic", "Create a project from a template"
+            icons.PLUS, "Create a project from a template"
         )
         new_btn.connect("clicked", lambda *_: self._new_project_dialog())
         git_btn = self._header_action_btn(
-            "Git", "folder-download-symbolic", "Clone a project from git"
+            icons.GIT, "Clone a project from git"
         )
         git_btn.connect("clicked", lambda *_: self._import_git_project_dialog())
         browse_btn = self._header_action_btn(
-            "Browse", "folder-open-symbolic", "Open a .uproject on disk"
+            icons.FOLDER_OPEN, "Open a .uproject on disk"
         )
         browse_btn.connect("clicked", lambda *_: self._browse_project())
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -393,17 +543,20 @@ class MatesUnrealLauncherApp(Adw.Application):
         )
 
         refresh_btn = self._flat_btn(
-            icon="view-refresh-symbolic",
+            icon=icons.REFRESH,
             tooltip="Refresh Fab library from Epic",
         )
         refresh_btn.connect("clicked", lambda *_: self._load_plugins_async(force_refresh=True))
         box.append(self._section_header("Library", self.plugin_engine_dropdown, refresh_btn))
 
-        self.plugin_search = Gtk.SearchEntry()
+        search_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        search_row.append(self._icon_image(icons.SEARCH, 16, tooltip="Search"))
+        self.plugin_search = Gtk.Entry()
         self.plugin_search.set_placeholder_text("Search plugins & projects…")
         self.plugin_search.set_hexpand(True)
-        self.plugin_search.connect("search-changed", self._on_plugin_search_changed)
-        box.append(self.plugin_search)
+        self.plugin_search.connect("changed", self._on_plugin_search_changed)
+        search_row.append(self.plugin_search)
+        box.append(search_row)
 
         scrolled = Gtk.ScrolledWindow(vexpand=True)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -437,6 +590,8 @@ class MatesUnrealLauncherApp(Adw.Application):
         clamp.set_child(box)
 
         group = Adw.PreferencesGroup()
+        group.add_css_class("mates-settings")
+        self.settings_group = group
 
         engine_row = Adw.EntryRow(title="Engine roots")
         engine_row.set_text(", ".join(str(p) for p in self.config.engine_roots))
@@ -454,17 +609,11 @@ class MatesUnrealLauncherApp(Adw.Application):
         engine_cache_row.set_text(str(self.config.engine_cache_dir))
         group.add(engine_cache_row)
 
-        engine_pref = Adw.EntryRow(title="Preferred engine")
-        engine_pref.set_text(self.config.preferred_engine)
-        group.add(engine_pref)
+        self._sync_preferred_engine_row()
 
         box.append(group)
 
-        save_btn = Gtk.Button(label="Save")
-        save_btn.add_css_class("suggested-action")
-        save_btn.set_halign(Gtk.Align.START)
-
-        def _save(*_args: object) -> None:
+        def _persist_settings(*_args: object) -> None:
             self.config.set(
                 "engine_roots",
                 [p.strip() for p in engine_row.get_text().split(",") if p.strip()],
@@ -475,13 +624,16 @@ class MatesUnrealLauncherApp(Adw.Application):
             )
             self.config.set("engine_install_dir", engine_install_row.get_text().strip())
             self.config.set("engine_cache_dir", engine_cache_row.get_text().strip())
-            self.config.set("preferred_engine", engine_pref.get_text().strip() or "UE_5.7")
             self.config.save()
-            self.toast("Settings saved")
             self.refresh_all()
 
-        save_btn.connect("clicked", _save)
-        box.append(save_btn)
+        for row in (
+            engine_row,
+            project_row,
+            engine_install_row,
+            engine_cache_row,
+        ):
+            row.connect("apply", _persist_settings)
 
         about = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         about.add_css_class("mates-about")
@@ -509,6 +661,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         self._populate_engines()
         self._populate_projects()
         self._populate_plugin_engine_dropdown()
+        self._sync_preferred_engine_row()
         self._update_account_label()
         self._set_status(f"{len(self.engines)} engines · {len(self.projects)} projects")
         if load_tokens():
@@ -528,7 +681,7 @@ class MatesUnrealLauncherApp(Adw.Application):
 
             # Icon actions — Launch stays visible; folder is secondary.
             launch = self._flat_btn(
-                icon="media-playback-start-symbolic",
+                icon=icons.PLAY,
                 tooltip=f"Launch {eng.version_label}",
             )
 
@@ -538,13 +691,19 @@ class MatesUnrealLauncherApp(Adw.Application):
 
             launch.connect("clicked", _launch)
 
-            folder = self._flat_btn(icon="folder-symbolic", tooltip="Open folder")
+            folder = self._flat_btn(icon=icons.FOLDER, tooltip="Open folder")
             folder.connect(
                 "clicked",
                 lambda _b, path=eng.path: open_in_file_manager(path),
             )
-            row.add_suffix(folder)
-            row.add_suffix(launch)
+
+            remove = self._flat_btn(
+                icon=icons.TRASH,
+                tooltip=f"Remove {eng.version_label}",
+            )
+            remove.connect("clicked", lambda _b, engine=eng: self._confirm_remove_engine(engine))
+
+            self._add_row_actions(row, folder, launch, remove)
             self.engine_list.append(row)
         if self.engines:
             self.engine_list.select_row(self.engine_list.get_row_at_index(0))
@@ -555,54 +714,33 @@ class MatesUnrealLauncherApp(Adw.Application):
             self.engine_download_list.remove(child)
 
         installed_dirs = {eng.path.name for eng in self.engines}
+        available = [b for b in self.engine_blobs if b.install_dirname not in installed_dirs]
 
-        for blob in self.engine_blobs:
-            already = blob.install_dirname in installed_dirs
+        for blob in available:
             size = f"{blob.size_gib:.1f} GiB" if blob.size else "—"
             row = Adw.ActionRow()
             row.set_title(blob.install_dirname.replace("UE_", "UE "))
             row.set_subtitle(size)
-            row.set_activatable(not already)
+            row.set_activatable(True)
             row.blob = blob  # type: ignore[attr-defined]
-            row.already_installed = already  # type: ignore[attr-defined]
 
-            if already:
-                badge = Gtk.Label(label="Installed")
-                badge.add_css_class("dim-label")
-                badge.set_valign(Gtk.Align.CENTER)
-                row.add_suffix(badge)
-            else:
-                install = self._flat_btn(
-                    icon="folder-download-symbolic",
-                    tooltip=f"Install {blob.name}",
-                )
-                install.add_css_class("mates-install-btn")
+            install = self._flat_btn(
+                icon=icons.DOWNLOAD,
+                tooltip=f"Install {blob.name}",
+            )
+            install.add_css_class("mates-install-btn")
 
-                def _install(_btn: Gtk.Button, target: EngineBlob = blob) -> None:
-                    assert self.engine_download_list is not None
-                    for i, b in enumerate(self.engine_blobs):
-                        if b.name == target.name:
-                            self.engine_download_list.select_row(
-                                self.engine_download_list.get_row_at_index(i)
-                            )
-                            break
-                    self._install_selected_blob()
+            def _install(_btn: Gtk.Button, target: EngineBlob = blob) -> None:
+                self._confirm_install_blob(target)
 
-                install.connect("clicked", _install)
-                row.add_suffix(install)
-
+            install.connect("clicked", _install)
+            self._add_row_actions(row, install)
             self.engine_download_list.append(row)
 
-        if self.engine_blobs:
-            for i, blob in enumerate(self.engine_blobs):
-                row = self.engine_download_list.get_row_at_index(i)
-                if row and not getattr(row, "already_installed", False):
-                    self.engine_download_list.select_row(row)
-                    break
-            else:
-                self.engine_download_list.select_row(
-                    self.engine_download_list.get_row_at_index(0)
-                )
+        if available:
+            self.engine_download_list.select_row(
+                self.engine_download_list.get_row_at_index(0)
+            )
 
     def _populate_projects(self) -> None:
         assert self.project_list is not None
@@ -618,11 +756,11 @@ class MatesUnrealLauncherApp(Adw.Application):
             row.project = proj  # type: ignore[attr-defined]
 
             open_btn = self._flat_btn(
-                icon="media-playback-start-symbolic",
+                icon=icons.PLAY,
                 tooltip=f"Open {proj.name}",
             )
             folder_btn = self._flat_btn(
-                icon="folder-symbolic",
+                icon=icons.FOLDER,
                 tooltip="Show project folder",
             )
 
@@ -639,12 +777,9 @@ class MatesUnrealLauncherApp(Adw.Application):
 
             open_btn.connect("clicked", _open)
             folder_btn.connect("clicked", _folder)
-            row.add_suffix(folder_btn)
-            row.add_suffix(open_btn)
+            self._add_row_actions(row, folder_btn, open_btn)
 
-            thumb = Gtk.Image.new_from_icon_name("folder-symbolic")
-            thumb.set_pixel_size(40)
-            thumb.set_valign(Gtk.Align.CENTER)
+            thumb = self._icon_image(icons.FOLDER, 32)
             thumb.add_css_class("mates-project-icon")
             row.add_prefix(thumb)
             self._bind_project_icon(thumb, proj)
@@ -681,6 +816,56 @@ class MatesUnrealLauncherApp(Adw.Application):
                 self.plugin_engine_dropdown.set_selected(i)
                 break
 
+    def _sync_preferred_engine_row(self) -> None:
+        group = self.settings_group
+        if group is None:
+            return
+
+        if self.preferred_engine_row is not None:
+            group.remove(self.preferred_engine_row)
+            self.preferred_engine_row = None
+
+        if not self.engines:
+            row = Adw.ActionRow(title="Preferred engine")
+            row.set_subtitle("Not installed")
+            row.set_activatable(False)
+            self.preferred_engine_row = row
+            group.add(row)
+            return
+
+        combo = Adw.ComboRow(title="Preferred engine")
+        labels = [eng.version_label.replace("UE_", "UE ") for eng in self.engines]
+        combo.set_model(Gtk.StringList.new(labels))
+
+        preferred = self.config.preferred_engine
+        selected = 0
+        for i, eng in enumerate(self.engines):
+            if eng.version_label == preferred or preferred in eng.path.name:
+                selected = i
+                break
+        self._syncing_preferred_engine = True
+        try:
+            combo.set_selected(selected)
+        finally:
+            self._syncing_preferred_engine = False
+
+        combo.connect("notify::selected", self._on_preferred_engine_changed)
+        self.preferred_engine_row = combo
+        group.add(combo)
+
+    def _on_preferred_engine_changed(self, row: Adw.ComboRow, _pspec: GObject.ParamSpec) -> None:
+        if self._syncing_preferred_engine or not self.engines:
+            return
+        idx = int(row.get_selected())
+        if idx < 0 or idx >= len(self.engines):
+            return
+        label = self.engines[idx].version_label
+        if self.config.preferred_engine == label:
+            return
+        self.config.set("preferred_engine", label)
+        self.config.save()
+        self._populate_plugin_engine_dropdown()
+
     def _selected_plugin_engine(self) -> EngineInstall | None:
         if not self.plugin_engine_dropdown or not self.engines:
             return None
@@ -689,7 +874,7 @@ class MatesUnrealLauncherApp(Adw.Application):
             return pick_engine(self.engines, self.config.preferred_engine)
         return self.engines[idx]
 
-    def _on_plugin_search_changed(self, entry: Gtk.SearchEntry) -> None:
+    def _on_plugin_search_changed(self, entry: Gtk.Entry) -> None:
         self._plugin_search_query = entry.get_text()
         if self._plugin_search_timeout_id:
             GLib.source_remove(self._plugin_search_timeout_id)
@@ -730,19 +915,15 @@ class MatesUnrealLauncherApp(Adw.Application):
         row = Adw.ActionRow()
         row.set_activatable(True)
 
-        image = Gtk.Image.new_from_icon_name("application-x-addon-symbolic")
-        image.set_pixel_size(40)
-        image.set_valign(Gtk.Align.CENTER)
+        image = self._icon_image(icons.PLUGIN, 32)
         image.add_css_class("mates-plugin-icon")
         row.add_prefix(image)
 
-        badge = Gtk.Label(label="Installed")
-        badge.add_css_class("dim-label")
-        badge.set_valign(Gtk.Align.CENTER)
+        badge = self._status_icon(icons.CHECK, "Installed")
         badge.set_visible(False)
         row.add_suffix(badge)
 
-        action_btn = self._flat_btn(icon="folder-download-symbolic", tooltip="Install")
+        action_btn = self._flat_btn(icon=icons.DOWNLOAD, tooltip="Install")
         action_btn.add_css_class("mates-install-btn")
         action_btn.set_visible(False)
         row.add_suffix(action_btn)
@@ -766,7 +947,7 @@ class MatesUnrealLauncherApp(Adw.Application):
             row._plugin_action_handler = 0  # type: ignore[attr-defined]
         image: Gtk.Image = row._plugin_image  # type: ignore[attr-defined]
         image.plugin_asset_id = None  # type: ignore[attr-defined]
-        image.set_from_icon_name("application-x-addon-symbolic")
+        self._set_icon_on_image(image, icons.PLUGIN, 32)
 
     def _on_plugin_list_bind(
         self, _factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem
@@ -788,7 +969,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         row.set_subtitle(f"{kind_label} · {engines}")
 
         image: Gtk.Image = row._plugin_image  # type: ignore[attr-defined]
-        badge: Gtk.Label = row._plugin_badge  # type: ignore[attr-defined]
+        badge: Gtk.Image = row._plugin_badge  # type: ignore[attr-defined]
         action_btn: Gtk.Button = row._plugin_action  # type: ignore[attr-defined]
 
         # Disconnect previous bind's handler before wiring a new one.
@@ -811,7 +992,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         elif installed:
             badge.set_visible(False)
             action_btn.set_visible(True)
-            action_btn.set_icon_name("system-run-symbolic")
+            action_btn.set_child(self._icon_image(icons.BUILD, 16))
             action_btn.set_tooltip_text(f"Build {asset.title} for Linux")
 
             def _build(_btn: Gtk.Button, path: Path = installed) -> None:
@@ -821,7 +1002,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         else:
             badge.set_visible(False)
             action_btn.set_visible(True)
-            action_btn.set_icon_name("folder-download-symbolic")
+            action_btn.set_child(self._icon_image(icons.DOWNLOAD, 16))
             action_btn.set_tooltip_text(f"Install {asset.title}")
 
             def _install(_btn: Gtk.Button, target: FabAsset = asset) -> None:
@@ -831,7 +1012,7 @@ class MatesUnrealLauncherApp(Adw.Application):
 
     def _bind_plugin_icon(self, image: Gtk.Image, asset: FabAsset) -> None:
         image.plugin_asset_id = asset.asset_id  # type: ignore[attr-defined]
-        image.set_from_icon_name("application-x-addon-symbolic")
+        self._set_icon_on_image(image, icons.PLUGIN, 32)
 
         texture = self._plugin_textures.get(asset.asset_id)
         if texture is not None:
@@ -902,14 +1083,22 @@ class MatesUnrealLauncherApp(Adw.Application):
             return
         tokens = load_tokens()
         if not tokens:
-            self.account_btn.set_label("Account")
+            self.account_btn.set_child(
+                self._icon_image(icons.ACCOUNT, 16, tooltip="Account — sign in with Epic")
+            )
             return
         try:
             tokens = ensure_fresh_tokens(tokens)
             name = tokens.display_name or tokens.account_id[:8]
-            self.account_btn.set_label(name)
+            self.account_btn.set_child(
+                self._icon_image(icons.ACCOUNT, 16, tooltip=f"Signed in as {name}")
+            )
         except EpicAuthError:
-            self.account_btn.set_label("Session expired")
+            self.account_btn.set_child(
+                self._icon_image(
+                    icons.ACCOUNT, 16, tooltip="Session expired — sign in again"
+                )
+            )
 
     # --- actions ---------------------------------------------------------------
 
@@ -1312,11 +1501,127 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _install_selected_blob(self) -> None:
-        blob = self._selected_blob()
+    def _confirm_install_selected_blob(self) -> None:
+        self._confirm_install_blob(self._selected_blob())
+
+    def _confirm_install_blob(self, blob: EngineBlob | None) -> None:
         if not blob:
             self.toast("Select an engine to download")
             return
+        if self._installing_engine:
+            self.toast("An engine install is already running")
+            return
+        if not load_tokens():
+            self.toast("Sign in with Epic first")
+            return
+
+        install_dir = self.config.engine_install_dir
+        target = install_dir / blob.install_dirname
+        if target.exists():
+            self.toast(f"Already installed at {target}")
+            self.refresh_all()
+            return
+
+        size_label = f"{blob.size_gib:.1f} GiB" if blob.size else "unknown size"
+        needed = blob.size * 2 if blob.size else 0
+        space_note = ""
+        if needed:
+            check_path = install_dir if install_dir.exists() else Path.home()
+            free = shutil.disk_usage(check_path).free
+            space_note = (
+                f"\n\nNeed ~{needed / (1024**3):.0f} GiB free "
+                f"(have ~{free / (1024**3):.0f} GiB)."
+            )
+
+        dialog = Adw.AlertDialog(
+            heading=f"Install {blob.install_dirname.replace('UE_', 'UE ')}?",
+            body=(
+                f"Download and extract ~{size_label} to:\n{target}"
+                f"{space_note}"
+            ),
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("install", "Install")
+        dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("install")
+        dialog.set_close_response("cancel")
+
+        def _on_response(_d: Adw.AlertDialog, response: str) -> None:
+            if response == "install":
+                self._start_engine_install(blob)
+
+        dialog.connect("response", _on_response)
+        assert self.window is not None
+        dialog.present(self.window)
+
+    def _confirm_remove_engine(self, engine: EngineInstall) -> None:
+        if self._installing_engine:
+            self.toast("An engine install is already running")
+            return
+        if self._removing_engine:
+            self.toast("An engine removal is already running")
+            return
+
+        dialog = Adw.AlertDialog(
+            heading=f"Remove {engine.version_label.replace('UE_', 'UE ')}?",
+            body=(
+                f"Delete this engine from disk:\n{engine.path}\n\n"
+                "This cannot be undone."
+            ),
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("remove", "Remove")
+        dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+
+        def _on_response(_d: Adw.AlertDialog, response: str) -> None:
+            if response == "remove":
+                self._remove_engine(engine)
+
+        dialog.connect("response", _on_response)
+        assert self.window is not None
+        dialog.present(self.window)
+
+    def _remove_engine(self, engine: EngineInstall) -> None:
+        if self._removing_engine or self._installing_engine:
+            return
+        path = engine.path.resolve()
+        self._removing_engine = True
+        self._set_status(f"Removing {engine.version_label}…")
+
+        def worker() -> None:
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                elif path.exists():
+                    path.unlink()
+                err: str | None = None
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)
+
+            def done() -> bool:
+                self._removing_engine = False
+                if err:
+                    self.toast(err)
+                    self._set_status("Engine removal failed")
+                else:
+                    if str(self.config.get("default_engine_path", "")) == str(path):
+                        self.config.set("default_engine_path", "")
+                    preferred = self.config.preferred_engine
+                    if preferred and preferred in path.name:
+                        self.config.set("preferred_engine", "UE_5.7")
+                    self.config.save()
+                    self.refresh_all()
+                    self.toast(f"Removed {engine.version_label}")
+                    self._set_status(f"Removed {path}")
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_engine_install(self, blob: EngineBlob) -> None:
         if self._installing_engine:
             self.toast("An engine install is already running")
             return
@@ -1391,6 +1696,9 @@ class MatesUnrealLauncherApp(Adw.Application):
             GLib.idle_add(done)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _install_selected_blob(self) -> None:
+        self._confirm_install_selected_blob()
 
     def _open_epic_linux_downloads(self) -> None:
         if not load_tokens():

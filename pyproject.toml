@@ -21,4 +21,10 @@ build-backend = "setuptools.build_meta"
 include = ["ue_launcher*"]
 
 [tool.setuptools.package-data]
-ue_launcher = ["assets/*"]
+ue_launcher = [
+  "assets/*.png",
+  "assets/icons/hicolor/index.theme",
+  "assets/icons/hicolor/16x16/actions/*.png",
+  "assets/icons/hicolor/24x24/actions/*.png",
+  "assets/icons/hicolor/32x32/actions/*.png",
+]

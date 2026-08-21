@@ -62,6 +62,18 @@ install_python_app() {
   "curl_cffi>=0.7"
   find "${appdir}/usr/lib/python3/site-packages" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
   # Keep *.dist-info — curl_cffi imports metadata at load time.
+  install_mates_icons "${appdir}"
+}
+
+install_mates_icons() {
+  local appdir="$1"
+  local src="${appdir}/usr/lib/python3/site-packages/ue_launcher/assets/icons/hicolor"
+  local dst="${appdir}/usr/share/icons/hicolor"
+  for sz in 16x16 24x24 32x32; do
+    [[ -d "${src}/${sz}/actions" ]] || continue
+    mkdir -p "${dst}/${sz}/actions"
+    cp -a "${src}/${sz}/actions"/mates-*.png "${dst}/${sz}/actions/" 2>/dev/null || true
+  done
 }
 
 pack_appimage() {
@@ -195,7 +207,7 @@ apt-get install -y -qq --no-install-recommends \
   python3 python3-pip python3-gi python3-gi-cairo \
   gir1.2-gtk-4.0 gir1.2-adw-1 \
   libgtk-4-1 libadwaita-1-0 \
-  libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-bin librsvg2-2 webp-pixbuf-loader \
+  libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-bin librsvg2-2 librsvg2-common webp-pixbuf-loader \
   adwaita-icon-theme hicolor-icon-theme \
   shared-mime-info \
   glib-networking \
@@ -248,6 +260,15 @@ python3 -m pip install \
 
 find "${APPDIR}/usr/lib/python3/site-packages" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
 # Keep *.dist-info — curl_cffi imports metadata at load time.
+
+# Lucide PNG icons into the bundled hicolor theme (tab switcher / menu items).
+MATE_ICONS_SRC="${APPDIR}/usr/lib/python3/site-packages/ue_launcher/assets/icons/hicolor"
+MATE_ICONS_DST="${APPDIR}/usr/share/icons/hicolor"
+for sz in 16x16 24x24 32x32; do
+  [[ -d "${MATE_ICONS_SRC}/${sz}/actions" ]] || continue
+  mkdir -p "${MATE_ICONS_DST}/${sz}/actions"
+  cp -a "${MATE_ICONS_SRC}/${sz}/actions"/mates-*.png "${MATE_ICONS_DST}/${sz}/actions/" 2>/dev/null || true
+done
 
 # Smoke: bundled python must import Gtk/Adw + curl_cffi without host paths
 export LD_LIBRARY_PATH="${APPDIR}/usr/lib"
