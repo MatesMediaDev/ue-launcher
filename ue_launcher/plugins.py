@@ -265,8 +265,8 @@ def install_fab_plugin(
     installed = [install_plugin_from_dir(root, dest_parent) for root in plugin_roots]
     dest = installed[0]
 
-    # Engine plugins need Linux binaries before the editor will load them.
-    if project is None and build_linux and not plugin_has_linux_binaries(dest):
+    # Fab code plugins ship Win/Mac binaries only — compile for Linux before use.
+    if build_linux and plugin_needs_linux_build(dest) and not plugin_has_linux_binaries(dest):
         build_plugin_linux(engine, dest, progress=progress)
     return dest
 
@@ -351,7 +351,7 @@ def install_fab_content(
     # Prefer plugin/project handlers if the pack actually contains those.
     if _find_plugin_roots(staging):
         return install_fab_plugin(
-            asset, engine, cache_dir, project=project, build_linux=False, progress=progress
+            asset, engine, cache_dir, project=project, build_linux=True, progress=progress
         )
     if _find_uproject_roots(staging):
         raise FabError(
@@ -438,13 +438,90 @@ def plugin_module_names(plugin_dir: Path) -> list[str]:
     return names
 
 
+def plugin_needs_linux_build(plugin_dir: Path) -> bool:
+    """True when the plugin ships C++ source and needs a local Linux compile."""
+    if not (plugin_dir / "Source").is_dir():
+        return False
+    return bool(plugin_module_names(plugin_dir))
+
+
+def _write_uplugin(path: Path, data: dict) -> None:
+    path.write_text(json.dumps(data, indent="\t") + "\n", encoding="utf-8")
+
+
+def prepare_plugin_for_linux_build(plugin_dir: Path) -> bool:
+    """Ensure .uplugin modules allow Linux — Fab often ships Win/Mac only.
+
+    BuildPlugin exits 0 without producing .so files when Linux is missing from
+    PlatformAllowList, which is why marketplace installs looked successful but
+    had empty Binaries/Linux folders.
+    """
+    uplugins = list(plugin_dir.glob("*.uplugin"))
+    if not uplugins:
+        return False
+    uplugin_path = uplugins[0]
+    meta = _read_uplugin(uplugin_path)
+    if not meta:
+        return False
+
+    changed = False
+    allow_keys = ("PlatformAllowList", "WhitelistPlatforms")
+    deny_keys = ("PlatformDenyList", "BlacklistPlatforms")
+    for mod in meta.get("Modules") or []:
+        if not isinstance(mod, dict):
+            continue
+        for key in allow_keys:
+            platforms = mod.get(key)
+            if not isinstance(platforms, list):
+                continue
+            if "Linux" not in platforms:
+                mod[key] = [*platforms, "Linux"]
+                changed = True
+        for key in deny_keys:
+            platforms = mod.get(key)
+            if not isinstance(platforms, list) or "Linux" not in platforms:
+                continue
+            mod[key] = [p for p in platforms if p != "Linux"]
+            changed = True
+
+    if not changed:
+        return False
+
+    backup = uplugin_path.with_suffix(uplugin_path.suffix + ".bak")
+    if not backup.is_file():
+        shutil.copy2(uplugin_path, backup)
+    _write_uplugin(uplugin_path, meta)
+    return True
+
+
 def plugin_has_linux_binaries(plugin_dir: Path) -> bool:
     binaries = plugin_dir / "Binaries" / "Linux"
     if not binaries.is_dir():
         return False
-    return any(binaries.rglob("*.so")) or any(
-        p.is_file() and p.suffix == "" for p in binaries.rglob("*")
-    )
+    if any(binaries.glob("libUnrealEditor-*.so")):
+        return True
+    if (binaries / "UnrealEditor.modules").is_file():
+        return True
+    return any(binaries.rglob("*.so"))
+
+
+def _plugin_build_output_root(package: Path, uplugin_name: str) -> Path:
+    """Locate BuildPlugin output (Binaries/Linux may sit at package root)."""
+    candidates: list[Path] = []
+    if (package / "Binaries" / "Linux").is_dir():
+        candidates.append(package)
+    for uplugin_path in package.rglob(uplugin_name):
+        parent = uplugin_path.parent
+        if (parent / "Binaries" / "Linux").is_dir():
+            candidates.append(parent)
+    if candidates:
+        return min(candidates, key=lambda p: len(p.parts))
+    if (package / uplugin_name).is_file():
+        return package
+    nested = sorted(package.rglob(uplugin_name), key=lambda p: len(p.parts))
+    if nested:
+        return nested[0].parent
+    return package
 
 
 def ensure_engine_toolchain_executable(engine: EngineInstall) -> None:
@@ -479,6 +556,7 @@ def build_plugin_linux(
     if not uplugins:
         raise FabError(f"No .uplugin in {plugin_dir}")
     uplugin = uplugins[0]
+    prepare_plugin_for_linux_build(plugin_dir)
     runuat = engine.path / "Engine" / "Build" / "BatchFiles" / "RunUAT.sh"
     if not runuat.is_file():
         raise FabError(f"RunUAT.sh missing in {engine.path}")
@@ -513,14 +591,10 @@ def build_plugin_linux(
         tail = (proc.stdout or "")[-1500:] + "\n" + (proc.stderr or "")[-1500:]
         raise FabError(f"BuildPlugin failed for {plugin_dir.name}:\n{tail.strip()}")
 
-    # Merge Linux binaries (+ rebuilt Intermediate if present) back into the live plugin.
-    # BuildPlugin writes either Package/<files> or Package/HostProject/Plugins/<Name>/.
-    built_plugin = package
-    if not (package / uplugin.name).is_file():
-        nested = list(package.rglob(uplugin.name))
-        if nested:
-            built_plugin = nested[0].parent
-    if not list(built_plugin.glob("*.uplugin")):
+    built_plugin = _plugin_build_output_root(package, uplugin.name)
+    if not list(built_plugin.glob("*.uplugin")) and not (
+        built_plugin / "Binaries" / "Linux"
+    ).is_dir():
         raise FabError(f"BuildPlugin produced no plugin tree under {package}")
 
     for sub in ("Binaries", "Intermediate"):

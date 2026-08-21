@@ -41,6 +41,7 @@ from ..plugins import (
     is_project_asset,
     plugin_has_linux_binaries,
     plugin_installed_for_asset,
+    plugin_needs_linux_build,
     search_plugins,
 )
 from ..projects import (
@@ -900,7 +901,11 @@ class MatesUnrealLauncherApp(Adw.Application):
             installed = (
                 plugin_installed_for_asset(asset, engine=engine) if engine else None
             )
-            if installed and not plugin_has_linux_binaries(installed):
+            if (
+                installed
+                and plugin_needs_linux_build(installed)
+                and not plugin_has_linux_binaries(installed)
+            ):
                 self._build_installed_plugin(installed)
                 return
             if installed:
@@ -986,10 +991,14 @@ class MatesUnrealLauncherApp(Adw.Application):
             if kind == "plugin" and engine
             else None
         )
-        if installed and plugin_has_linux_binaries(installed):
+        if (
+            installed
+            and plugin_needs_linux_build(installed)
+            and plugin_has_linux_binaries(installed)
+        ):
             badge.set_visible(True)
             action_btn.set_visible(False)
-        elif installed:
+        elif installed and plugin_needs_linux_build(installed):
             badge.set_visible(False)
             action_btn.set_visible(True)
             action_btn.set_child(self._icon_image(icons.BUILD, 16))
