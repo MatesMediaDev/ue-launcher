@@ -32,12 +32,21 @@ class ReleaseInfo:
 
 
 def running_appimage() -> Path | None:
-    """Path to the AppImage file when launched via the AppImage runtime."""
+    """Path to *this* AppImage when launched via the AppImage runtime.
+
+    Ignores inherited ``APPIMAGE`` from a host IDE (e.g. Cursor) so source /
+    menu launches do not try to overwrite the wrong file.
+    """
     raw = os.environ.get("APPIMAGE", "").strip()
     if not raw:
         return None
     path = Path(raw)
-    return path if path.is_file() else None
+    if not path.is_file():
+        return None
+    name = path.name.lower()
+    if "unreal" not in name and "mates" not in name:
+        return None
+    return path
 
 
 def parse_version(text: str) -> tuple[int, ...]:

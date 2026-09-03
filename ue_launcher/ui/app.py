@@ -391,6 +391,8 @@ class MatesUnrealLauncherApp(Adw.Application):
         toolbar.add_top_bar(header)
 
         self.view_stack = Adw.ViewStack()
+        self.view_stack.set_vexpand(True)
+        self.view_stack.set_hexpand(True)
         tab_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         tab_bar.add_css_class("linked")
 
@@ -453,17 +455,23 @@ class MatesUnrealLauncherApp(Adw.Application):
         root.set_margin_bottom(12)
         root.set_margin_start(14)
         root.set_margin_end(14)
+        root.set_vexpand(True)
+        root.set_hexpand(True)
 
         # Installed
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         left.add_css_class("mates-panel")
         left.set_hexpand(True)
+        left.set_vexpand(True)
         left.set_size_request(280, -1)
 
         left.append(self._section_header("Installed"))
 
         scrolled = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_propagate_natural_height(False)
+        scrolled.set_propagate_natural_width(False)
+        scrolled.set_min_content_height(160)
         self.engine_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.engine_list.add_css_class("boxed-list")
         self.engine_list.set_activate_on_single_click(True)
@@ -479,6 +487,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         right.add_css_class("mates-panel")
         right.set_hexpand(True)
+        right.set_vexpand(True)
         right.set_size_request(320, -1)
 
         refresh_avail = self._flat_btn(
@@ -489,6 +498,9 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         dl_scrolled = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
         dl_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        dl_scrolled.set_propagate_natural_height(False)
+        dl_scrolled.set_propagate_natural_width(False)
+        dl_scrolled.set_min_content_height(160)
         self.engine_download_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.engine_download_list.add_css_class("boxed-list")
         self.engine_download_list.set_activate_on_single_click(True)
@@ -509,6 +521,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         box.set_margin_start(14)
         box.set_margin_end(14)
         box.add_css_class("mates-panel")
+        box.set_vexpand(True)
 
         new_btn = self._header_action_btn(
             icons.PLUS, "Create a project from a template"
@@ -531,6 +544,8 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         scrolled = Gtk.ScrolledWindow(vexpand=True)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_propagate_natural_height(False)
+        scrolled.set_min_content_height(160)
         self.project_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.project_list.add_css_class("boxed-list")
         self.project_list.set_activate_on_single_click(True)
@@ -574,6 +589,8 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         scrolled = Gtk.ScrolledWindow(vexpand=True)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_propagate_natural_height(False)
+        scrolled.set_min_content_height(160)
 
         self.plugin_store = Gio.ListStore.new(PluginListItem)
         self.plugin_selection = Gtk.SingleSelection.new(self.plugin_store)
@@ -604,12 +621,17 @@ class MatesUnrealLauncherApp(Adw.Application):
         return btn
 
     def _build_settings_page(self) -> Gtk.Widget:
+        outer = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
+        outer.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        outer.set_propagate_natural_height(False)
+
         clamp = Adw.Clamp(maximum_size=560)
         clamp.set_margin_top(8)
         clamp.set_margin_bottom(16)
         clamp.set_margin_start(14)
         clamp.set_margin_end(14)
         clamp.add_css_class("mates-settings-page")
+        outer.set_child(clamp)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         clamp.set_child(box)
@@ -742,7 +764,7 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         startup_row = Adw.SwitchRow(
             title="Check on startup",
-            subtitle="Once a day when the launcher opens",
+            subtitle="Download newer AppImages automatically when launched",
         )
         startup_row.set_active(bool(self.config.get("check_updates_on_startup", True)))
 
@@ -780,7 +802,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         about_text.append(studio)
         about.append(about_text)
         box.append(about)
-        return clamp
+        return outer
 
     def _config_path_list(self, key: str) -> list[str]:
         raw = self.config.get(key) or []
@@ -2408,12 +2430,8 @@ class MatesUnrealLauncherApp(Adw.Application):
     def _maybe_check_updates_on_startup(self) -> bool:
         if not self.config.get("check_updates_on_startup", True):
             return False
-        import time
-
-        now = int(time.time())
-        last = int(self.config.get("last_update_check") or 0)
-        if now - last < 24 * 60 * 60:
-            return False
+        # Always check when the toggle is on — a 24h throttle made it look broken.
+        self._set_status("Checking for updates…")
         self._check_for_updates(manual=False)
         return False
 
@@ -2423,8 +2441,8 @@ class MatesUnrealLauncherApp(Adw.Application):
                 self.toast("Update check already running")
             return
         self._checking_update = True
+        self._set_update_status("Checking GitHub for updates…")
         if manual:
-            self._set_update_status("Checking GitHub for updates…")
             self._set_status("Checking for updates…")
 
         def worker() -> None:
@@ -2444,21 +2462,31 @@ class MatesUnrealLauncherApp(Adw.Application):
                 if err or release is None:
                     msg = err or "No release info"
                     self._set_update_status(f"Update check failed: {msg}")
+                    self._set_status("Ready" if not manual else "Update check failed")
                     if manual:
                         self.toast("Update check failed")
-                        self._set_status("Ready")
                     return
                 if not is_newer(release.version):
                     self._set_update_status(f"Up to date (v{__version__})")
+                    self._set_status("Ready")
                     if manual:
                         self.toast(f"You're on the latest — v{__version__}")
-                        self._set_status("Ready")
                     return
                 skipped = str(self.config.get("skipped_update_tag") or "")
                 if not manual and skipped == release.tag:
                     self._set_update_status(
                         f"Update available: {release.tag} (skipped)"
                     )
+                    self._set_status("Ready")
+                    return
+                # Startup + AppImage: download immediately, then ask to relaunch.
+                if (
+                    not manual
+                    and running_appimage() is not None
+                    and release.appimage_url
+                ):
+                    self.toast(f"Updating to {release.tag}…")
+                    self._install_update(release)
                     return
                 self._prompt_update(release)
 
