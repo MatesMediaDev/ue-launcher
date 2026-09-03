@@ -620,6 +620,24 @@ class MatesUnrealLauncherApp(Adw.Application):
         self._sync_preferred_engine_row()
         box.append(preferred)
 
+        launch = Adw.PreferencesGroup(
+            title="Launch options",
+            description="Extra UnrealEditor flags (Steam-style), e.g. -log -nosplash",
+        )
+        launch.add_css_class("mates-settings")
+        launch_opts = Adw.EntryRow(title="Global")
+        launch_opts.set_text(str(self.config.get("editor_launch_options") or ""))
+        launch_opts.set_show_apply_button(True)
+
+        def _save_launch_opts(*_args: object) -> None:
+            self.config.set("editor_launch_options", launch_opts.get_text().strip())
+            self.config.save()
+            self.toast("Launch options saved")
+
+        launch_opts.connect("apply", _save_launch_opts)
+        launch.add(launch_opts)
+        box.append(launch)
+
         folders = Adw.PreferencesGroup(
             title="Folders",
             description="Install location, zip cache, and extra engine scan paths",
@@ -1046,6 +1064,10 @@ class MatesUnrealLauncherApp(Adw.Application):
                 icon=icons.PLAY,
                 tooltip=f"Open {proj.name}",
             )
+            opts_btn = self._flat_btn(
+                icon=icons.EDIT,
+                tooltip="Launch options for this project",
+            )
             folder_btn = self._flat_btn(
                 icon=icons.FOLDER,
                 tooltip="Show project folder",
@@ -1062,9 +1084,13 @@ class MatesUnrealLauncherApp(Adw.Application):
             def _folder(_btn: Gtk.Button, project: UProject = proj) -> None:
                 open_in_file_manager(project.directory)
 
+            def _opts(_btn: Gtk.Button, project: UProject = proj) -> None:
+                self._edit_project_launch_options(project)
+
             open_btn.connect("clicked", _open)
+            opts_btn.connect("clicked", _opts)
             folder_btn.connect("clicked", _folder)
-            self._add_row_actions(row, folder_btn, open_btn)
+            self._add_row_actions(row, folder_btn, opts_btn, open_btn)
 
             thumb = self._icon_image(icons.FOLDER, 32)
             thumb.add_css_class("mates-project-icon")
@@ -2019,6 +2045,47 @@ class MatesUnrealLauncherApp(Adw.Application):
         self.config.save()
         launch_editor(eng, self.config, project=proj.path)
         self.toast(f"Opening {proj.name}")
+
+    def _edit_project_launch_options(self, project: UProject) -> None:
+        key = str(project.path.resolve())
+        per = self.config.get("project_launch_options") or {}
+        if not isinstance(per, dict):
+            per = {}
+        current = str(per.get(key) or "")
+
+        dialog = Adw.AlertDialog(
+            heading=f"Launch options — {project.name}",
+            body="Extra UnrealEditor flags for this project only (appended after Settings → Launch options).",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("clear", "Clear")
+        dialog.add_response("save", "Save")
+        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("save")
+        dialog.set_close_response("cancel")
+
+        entry = Gtk.Entry()
+        entry.set_text(current)
+        entry.set_placeholder_text("-log -nosplash")
+        entry.set_hexpand(True)
+        dialog.set_extra_child(entry)
+
+        def _on_response(_d: Adw.AlertDialog, response: str) -> None:
+            if response == "cancel":
+                return
+            data = dict(self.config.get("project_launch_options") or {})
+            if response == "clear" or not entry.get_text().strip():
+                data.pop(key, None)
+                self.toast(f"Cleared launch options for {project.name}")
+            else:
+                data[key] = entry.get_text().strip()
+                self.toast(f"Saved launch options for {project.name}")
+            self.config.set("project_launch_options", data)
+            self.config.save()
+
+        dialog.connect("response", _on_response)
+        assert self.window is not None
+        dialog.present(self.window)
 
     def _browse_project(self) -> None:
         dialog = Gtk.FileDialog(title="Open .uproject")

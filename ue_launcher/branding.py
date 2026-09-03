@@ -131,7 +131,7 @@ def css() -> str:
 
     list row button.mates-row-btn,
     listview row button.mates-row-btn {{
-      opacity: 0;
+      opacity: 0.85;
     }}
 
     list row:hover button.mates-row-btn,

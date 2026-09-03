@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -137,6 +138,34 @@ def build_env(config: Config, base: dict[str, str] | None = None) -> dict[str, s
     return env
 
 
+def parse_launch_options(text: str) -> list[str]:
+    """Split a Steam-style launch-options string into argv tokens."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    try:
+        return shlex.split(text, posix=True)
+    except ValueError:
+        return text.split()
+
+
+def configured_extra_args(
+    config: Config, project: Path | None = None
+) -> list[str]:
+    """Global + optional per-project UnrealEditor CLI args from config."""
+    args = parse_launch_options(str(config.get("editor_launch_options") or ""))
+    if project is None:
+        return args
+    per = config.get("project_launch_options") or {}
+    if not isinstance(per, dict):
+        return args
+    resolved = str(Path(project).expanduser().resolve())
+    raw = per.get(resolved) or per.get(str(project)) or per.get(str(Path(project)))
+    if raw:
+        args.extend(parse_launch_options(str(raw)))
+    return args
+
+
 def editor_launch_args(config: Config, extra_args: list[str] | None = None) -> list[str]:
     """CLI flags for UnrealEditor (Slate workarounds on Linux Wayland / Deck)."""
     args: list[str] = []
@@ -169,7 +198,10 @@ def launch_editor(
     cmd = [str(engine.editor)]
     if project is not None:
         cmd.append(str(Path(project).expanduser().resolve()))
-    cmd.extend(editor_launch_args(config, extra_args))
+    merged = configured_extra_args(config, project)
+    if extra_args:
+        merged.extend(extra_args)
+    cmd.extend(editor_launch_args(config, merged))
 
     env = build_env(config)
     # Detach from launcher so closing the UI doesn't kill the editor
