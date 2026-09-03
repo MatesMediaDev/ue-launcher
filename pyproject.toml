@@ -1,6 +1,6 @@
 [project]
 name = "mates-unreal-launcher"
-version = "0.3.0"
+version = "0.3.1"
 description = "Unreal Launcher — Linux-native Unreal Engine launcher"
 readme = "README.md"
 requires-python = ">=3.11"
