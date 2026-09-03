@@ -50,10 +50,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Empty = auto-detect (NVIDIA ICD if present, else RADV). Never force NVIDIA on Deck/AMD.
     "vulkan_icd": "",
     "prefer_x11": True,
-    # Extra UnrealEditor CLI flags (Steam-style), e.g. -log -nosplash
+    # Extra UnrealEditor CLI flags (Steam-style), e.g. -game -ResX=1920
     "editor_launch_options": "",
     # Per-project overrides: { "/path/to/Foo.uproject": "-game ..." }
     "project_launch_options": {},
+    # Common startup toggles (separate Settings fields).
+    "launch_nosplash": False,
+    "launch_log": False,
+    "launch_windowed": False,
     # UE 5.7 + Wayland: Slate tooltips are separate windows and eat the first click.
     "slate_disable_tooltips": True,
     # When tooltips stay on (slate_disable_tooltips false), delay before they appear (seconds).

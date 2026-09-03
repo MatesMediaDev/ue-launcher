@@ -152,8 +152,15 @@ def parse_launch_options(text: str) -> list[str]:
 def configured_extra_args(
     config: Config, project: Path | None = None
 ) -> list[str]:
-    """Global + optional per-project UnrealEditor CLI args from config."""
-    args = parse_launch_options(str(config.get("editor_launch_options") or ""))
+    """Global toggles + freeform string + optional per-project CLI args."""
+    args: list[str] = []
+    if config.get("launch_nosplash", False):
+        args.append("-nosplash")
+    if config.get("launch_log", False):
+        args.append("-log")
+    if config.get("launch_windowed", False):
+        args.append("-windowed")
+    args.extend(parse_launch_options(str(config.get("editor_launch_options") or "")))
     if project is None:
         return args
     per = config.get("project_launch_options") or {}

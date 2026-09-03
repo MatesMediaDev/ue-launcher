@@ -621,20 +621,71 @@ class MatesUnrealLauncherApp(Adw.Application):
         box.append(preferred)
 
         launch = Adw.PreferencesGroup(
-            title="Launch options",
-            description="Extra UnrealEditor flags (Steam-style), e.g. -log -nosplash",
+            title="Editor startup",
+            description="Display, Slate workarounds, and UnrealEditor flags",
         )
         launch.add_css_class("mates-settings")
-        launch_opts = Adw.EntryRow(title="Global")
+
+        def _bind_switch(title: str, subtitle: str, key: str, default: bool) -> Adw.SwitchRow:
+            row = Adw.SwitchRow(title=title, subtitle=subtitle)
+            row.set_active(bool(self.config.get(key, default)))
+
+            def _on_toggle(switch: Adw.SwitchRow, *_args: object, cfg_key: str = key) -> None:
+                self.config.set(cfg_key, bool(switch.get_active()))
+                self.config.save()
+
+            row.connect("notify::active", _on_toggle)
+            launch.add(row)
+            return row
+
+        _bind_switch(
+            "Prefer X11",
+            "Force SDL/Qt onto XWayland — fixes color picker & menus on Wayland",
+            "prefer_x11",
+            True,
+        )
+        _bind_switch(
+            "Disable tooltips",
+            "Slate.EnableTooltips 0 — stops tooltip windows stealing the first click",
+            "slate_disable_tooltips",
+            True,
+        )
+        _bind_switch(
+            "Disable notification popups",
+            "Slate.bAllowNotifications 0 — toast popups that block clicks",
+            "slate_disable_notifications",
+            True,
+        )
+        _bind_switch(
+            "No splash screen",
+            "Pass -nosplash to UnrealEditor",
+            "launch_nosplash",
+            False,
+        )
+        _bind_switch(
+            "Show log window",
+            "Pass -log to UnrealEditor",
+            "launch_log",
+            False,
+        )
+        _bind_switch(
+            "Windowed",
+            "Pass -windowed to UnrealEditor",
+            "launch_windowed",
+            False,
+        )
+
+        launch_opts = Adw.EntryRow(title="Additional flags")
         launch_opts.set_text(str(self.config.get("editor_launch_options") or ""))
         launch_opts.set_show_apply_button(True)
 
         def _save_launch_opts(*_args: object) -> None:
             self.config.set("editor_launch_options", launch_opts.get_text().strip())
             self.config.save()
-            self.toast("Launch options saved")
+            self.toast("Additional flags saved")
 
         launch_opts.connect("apply", _save_launch_opts)
+        launch_opts.set_tooltip_text("Freeform UnrealEditor args, e.g. -game -ResX=1920")
         launch.add(launch_opts)
         box.append(launch)
 
@@ -2055,7 +2106,10 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         dialog = Adw.AlertDialog(
             heading=f"Launch options — {project.name}",
-            body="Extra UnrealEditor flags for this project only (appended after Settings → Launch options).",
+            body=(
+                "Extra UnrealEditor flags for this project only "
+                "(after Settings → Editor startup toggles & additional flags)."
+            ),
         )
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("clear", "Clear")
