@@ -37,6 +37,7 @@ LOGIN = "mates-login"
 LOGOUT = "mates-logout"
 BOXES = "mates-boxes"
 TRASH = "mates-trash"
+EDIT = "mates-edit"
 
 
 def png_path(name: str, size: int = 16) -> Path | None:

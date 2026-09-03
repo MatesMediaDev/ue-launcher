@@ -640,7 +640,7 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         _bind_switch(
             "Prefer X11",
-            "Force SDL/Qt onto XWayland — fixes color picker & menus on Wayland",
+            "Force SDL/Qt onto XWayland — fixes color picker and menus on Wayland",
             "prefer_x11",
             True,
         )
@@ -2108,7 +2108,7 @@ class MatesUnrealLauncherApp(Adw.Application):
             heading=f"Launch options — {project.name}",
             body=(
                 "Extra UnrealEditor flags for this project only "
-                "(after Settings → Editor startup toggles & additional flags)."
+                "(after Settings → Editor startup toggles and additional flags)."
             ),
         )
         dialog.add_response("cancel", "Cancel")
