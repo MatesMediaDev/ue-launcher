@@ -53,6 +53,8 @@ On Steam Deck (or any host without FUSE), keep `APPIMAGE_EXTRACT_AND_RUN=1`.
 
 If it fails, check `~/.cache/mates-unreal-launcher/appimage.log`.
 
+Settings → **Updates** checks [GitHub Releases](https://github.com/MatesMediaDev/ue-launcher/releases) daily (optional). When you run the AppImage, **Update** replaces that file in place — quit and relaunch to use the new build.
+
 Thin host-only build (dev): `HOST_ONLY=1 ./scripts/build-appimage.sh`
 
 ## Install from source (Bazzite / Fedora)

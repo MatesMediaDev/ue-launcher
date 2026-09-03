@@ -56,6 +56,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Long delay (e.g. 4) often avoids the first-click steal while still allowing Blueprint pin help.
     "slate_tooltip_delay": 4.0,
     "slate_disable_notifications": True,
+    # Auto-update (GitHub Releases AppImage).
+    "check_updates_on_startup": True,
+    "skipped_update_tag": "",
+    "last_update_check": 0,
 }
 
 

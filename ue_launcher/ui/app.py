@@ -16,7 +16,8 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
 
 from .. import branding, icons
-from ..config import APP_ID, APP_NAME, Config
+from .. import __version__
+from ..config import APP_ID, APP_NAME, Config, CACHE_DIR
 from ..engines import EngineInstall, discover_engines, pick_engine
 from ..epic import (
     EpicAuthError,
@@ -54,6 +55,15 @@ from ..projects import (
     project_thumbnail_path,
 )
 from ..thumbnails import cached_thumbnail, fetch_thumbnail
+from ..update import (
+    RELEASES_PAGE,
+    ReleaseInfo,
+    download_appimage,
+    download_to_cache,
+    fetch_latest_release,
+    is_newer,
+    running_appimage,
+)
 
 
 class PluginListItem(GObject.Object):
@@ -98,6 +108,10 @@ class MatesUnrealLauncherApp(Adw.Application):
         self._installing_engine = False
         self._removing_engine = False
         self._installing_plugin = False
+        self._checking_update = False
+        self._installing_update = False
+        self._update_check_btn: Gtk.Button | None = None
+        self._update_status_row: Adw.ActionRow | None = None
         self._plugin_search_query = ""
         self._plugin_textures: dict[str, Gdk.Texture] = {}
         self._project_textures: dict[str, Gdk.Texture] = {}
@@ -431,6 +445,7 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         self.refresh_all()
         self.window.present()
+        GLib.timeout_add_seconds(2, self._maybe_check_updates_on_startup)
 
     # --- pages -----------------------------------------------------------------
 
@@ -635,6 +650,46 @@ class MatesUnrealLauncherApp(Adw.Application):
             engine_cache_row,
         ):
             row.connect("apply", _persist_settings)
+
+        updates = Adw.PreferencesGroup(title="Updates")
+        updates.add_css_class("mates-settings")
+
+        version_row = Adw.ActionRow(title="Version", subtitle=f"v{__version__}")
+        check_btn = self._flat_btn(icon=icons.REFRESH, tooltip="Check for updates")
+        check_btn.connect("clicked", lambda *_: self._check_for_updates(manual=True))
+        self._update_check_btn = check_btn
+        version_row.add_suffix(check_btn)
+        updates.add(version_row)
+
+        startup_row = Adw.SwitchRow(
+            title="Check on startup",
+            subtitle="Look for a newer AppImage on GitHub once a day",
+        )
+        startup_row.set_active(bool(self.config.get("check_updates_on_startup", True)))
+
+        def _on_startup_toggle(switch: Adw.SwitchRow, *_args: object) -> None:
+            self.config.set("check_updates_on_startup", bool(switch.get_active()))
+            self.config.save()
+
+        startup_row.connect("notify::active", _on_startup_toggle)
+        updates.add(startup_row)
+
+        status_row = Adw.ActionRow(
+            title="Status",
+            subtitle="Updates replace the running AppImage when available.",
+        )
+        updates.add(status_row)
+        self._update_status_row = status_row
+
+        releases = Adw.ActionRow(title="Release notes on GitHub")
+        open_releases = self._flat_btn(
+            icon=icons.EXTERNAL, tooltip="Open GitHub releases"
+        )
+        open_releases.connect("clicked", lambda *_: self._open_url(RELEASES_PAGE))
+        releases.add_suffix(open_releases)
+        updates.add(releases)
+
+        box.append(updates)
 
         about = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         about.add_css_class("mates-about")
@@ -1988,6 +2043,202 @@ class MatesUnrealLauncherApp(Adw.Application):
         self.toast("Signed out")
 
     # --- helpers ---------------------------------------------------------------
+
+    def _open_url(self, url: str) -> None:
+        import webbrowser
+
+        webbrowser.open(url)
+
+    def _set_update_status(self, text: str) -> None:
+        if self._update_status_row is not None:
+            self._update_status_row.set_subtitle(text)
+
+    def _maybe_check_updates_on_startup(self) -> bool:
+        if not self.config.get("check_updates_on_startup", True):
+            return False
+        import time
+
+        now = int(time.time())
+        last = int(self.config.get("last_update_check") or 0)
+        if now - last < 24 * 60 * 60:
+            return False
+        self._check_for_updates(manual=False)
+        return False
+
+    def _check_for_updates(self, *, manual: bool) -> None:
+        if self._checking_update or self._installing_update:
+            if manual:
+                self.toast("Update check already running")
+            return
+        self._checking_update = True
+        if manual:
+            self._set_update_status("Checking GitHub for updates…")
+            self._set_status("Checking for updates…")
+
+        def worker() -> None:
+            err: str | None = None
+            release: ReleaseInfo | None = None
+            try:
+                release = fetch_latest_release()
+            except Exception as exc:  # noqa: BLE001 — surface to UI
+                err = str(exc)
+
+            def done() -> None:
+                import time
+
+                self._checking_update = False
+                self.config.set("last_update_check", int(time.time()))
+                self.config.save()
+                if err or release is None:
+                    msg = err or "No release info"
+                    self._set_update_status(f"Update check failed: {msg}")
+                    if manual:
+                        self.toast("Update check failed")
+                        self._set_status("Ready")
+                    return
+                if not is_newer(release.version):
+                    self._set_update_status(f"Up to date (v{__version__})")
+                    if manual:
+                        self.toast(f"You're on the latest — v{__version__}")
+                        self._set_status("Ready")
+                    return
+                skipped = str(self.config.get("skipped_update_tag") or "")
+                if not manual and skipped == release.tag:
+                    self._set_update_status(
+                        f"Update available: {release.tag} (skipped)"
+                    )
+                    return
+                self._prompt_update(release)
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _prompt_update(self, release: ReleaseInfo) -> None:
+        self._set_update_status(f"Update available: {release.tag}")
+        self._set_status(f"Update available: {release.tag}")
+        appimage = running_appimage()
+        can_replace = appimage is not None and bool(release.appimage_url)
+        body_bits = [
+            f"Current: v{__version__}",
+            f"Latest: {release.tag}",
+        ]
+        if can_replace:
+            body_bits.append(
+                f"\nDownload and replace:\n{appimage}"
+            )
+        elif release.appimage_url:
+            body_bits.append(
+                f"\nSave AppImage to:\n{CACHE_DIR / 'updates'}"
+            )
+        else:
+            body_bits.append("\nNo AppImage asset on this release — open GitHub.")
+
+        dialog = Adw.AlertDialog(
+            heading=f"Update to {release.tag}?",
+            body="\n".join(body_bits),
+        )
+        dialog.add_response("skip", "Skip")
+        dialog.add_response("notes", "Notes")
+        if release.appimage_url:
+            dialog.add_response("install", "Update")
+            dialog.set_response_appearance(
+                "install", Adw.ResponseAppearance.SUGGESTED
+            )
+            dialog.set_default_response("install")
+        else:
+            dialog.set_default_response("notes")
+        dialog.set_close_response("skip")
+
+        def _on_response(_d: Adw.AlertDialog, response: str) -> None:
+            if response == "notes":
+                self._open_url(release.html_url)
+                return
+            if response == "skip":
+                self.config.set("skipped_update_tag", release.tag)
+                self.config.save()
+                self._set_update_status(f"Skipped {release.tag}")
+                self._set_status("Ready")
+                return
+            if response == "install" and release.appimage_url:
+                self._install_update(release)
+
+        dialog.connect("response", _on_response)
+        assert self.window is not None
+        dialog.present(self.window)
+
+    def _install_update(self, release: ReleaseInfo) -> None:
+        if self._installing_update or not release.appimage_url:
+            return
+        self._installing_update = True
+        url = release.appimage_url
+        size = release.appimage_size
+        target = running_appimage()
+
+        def worker() -> None:
+            err: str | None = None
+            dest: Path | None = None
+            try:
+
+                def progress(msg: str, pct: int | None) -> None:
+                    GLib.idle_add(self._set_status, msg)
+                    if pct is not None:
+                        GLib.idle_add(
+                            self._set_update_status, f"{msg} ({pct}%)"
+                        )
+                    else:
+                        GLib.idle_add(self._set_update_status, msg)
+
+                if target is not None:
+                    dest = download_appimage(
+                        url, target, expected_size=size, progress=progress
+                    )
+                else:
+                    dest = download_to_cache(
+                        url,
+                        cache_dir=CACHE_DIR / "updates",
+                        expected_size=size,
+                        progress=progress,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)
+
+            def done() -> None:
+                self._installing_update = False
+                if err or dest is None:
+                    self._set_update_status(f"Update failed: {err or 'unknown'}")
+                    self.toast("Update failed")
+                    self._set_status("Ready")
+                    return
+                self.config.set("skipped_update_tag", "")
+                self.config.save()
+                if target is not None:
+                    self._set_update_status(
+                        f"Installed {release.tag} — quit and relaunch the AppImage"
+                    )
+                    self.toast(f"Updated to {release.tag} — relaunch to use it")
+                    self._set_status("Update installed — relaunch")
+                    note = Adw.AlertDialog(
+                        heading="Update installed",
+                        body=(
+                            f"{release.tag} replaced:\n{dest}\n\n"
+                            "Quit Unreal Launcher and open the AppImage again."
+                        ),
+                    )
+                    note.add_response("ok", "OK")
+                    note.set_default_response("ok")
+                    note.set_close_response("ok")
+                    assert self.window is not None
+                    note.present(self.window)
+                else:
+                    self._set_update_status(f"Downloaded to {dest}")
+                    self.toast(f"Downloaded {release.tag}")
+                    self._set_status("Ready")
+                    open_in_file_manager(dest.parent)
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def toast(self, message: str) -> None:
         if self.toast_overlay:
