@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import gi
@@ -101,6 +102,7 @@ class MatesUnrealLauncherApp(Adw.Application):
         self.settings_group: Adw.PreferencesGroup | None = None
         self.preferred_engine_row: Adw.PreferencesRow | None = None
         self._syncing_preferred_engine = False
+        self._folder_list_rows: dict[str, list[Adw.PreferencesRow]] = {}
         self.plugin_search: Gtk.Entry | None = None
         self.account_btn: Gtk.MenuButton | None = None
         self.view_stack: Adw.ViewStack | None = None
@@ -357,16 +359,12 @@ class MatesUnrealLauncherApp(Adw.Application):
         refresh_btn = self._flat_btn(icons.REFRESH, "Rescan engines & projects")
         refresh_btn.connect("clicked", lambda *_: self.refresh_all())
 
+        # Don't pack a brand mark here — Adw/CSD already shows the window icon
+        # (set_icon_name), which was doubling the Unreal U in the header.
         start_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         start_box.add_css_class("mates-header-start")
         start_box.set_margin_start(16)
         start_box.set_margin_end(4)
-        mark = self._brand_mark_widget(20)
-        if mark is not None:
-            mark_wrap = Gtk.Box()
-            mark_wrap.add_css_class("mates-header-mark")
-            mark_wrap.append(mark)
-            start_box.append(mark_wrap)
         start_box.append(refresh_btn)
         header.pack_start(start_box)
 
@@ -595,75 +593,87 @@ class MatesUnrealLauncherApp(Adw.Application):
         box.append(scrolled)
         return box
 
+    def _settings_btn(self, icon: str, tooltip: str = "") -> Gtk.Button:
+        """Always-visible icon button for Settings rows (not hover-only)."""
+        btn = Gtk.Button()
+        btn.set_child(self._icon_image(icon, 16))
+        btn.add_css_class("flat")
+        btn.add_css_class("mates-settings-btn")
+        if tooltip:
+            btn.set_tooltip_text(tooltip)
+        return btn
+
     def _build_settings_page(self) -> Gtk.Widget:
-        clamp = Adw.Clamp(maximum_size=640)
-        clamp.set_margin_top(12)
+        clamp = Adw.Clamp(maximum_size=560)
+        clamp.set_margin_top(8)
         clamp.set_margin_bottom(16)
         clamp.set_margin_start(14)
         clamp.set_margin_end(14)
+        clamp.add_css_class("mates-settings-page")
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         clamp.set_child(box)
 
-        group = Adw.PreferencesGroup()
-        group.add_css_class("mates-settings")
-        self.settings_group = group
-
-        engine_row = Adw.EntryRow(title="Engine roots")
-        engine_row.set_text(", ".join(str(p) for p in self.config.engine_roots))
-        group.add(engine_row)
-
-        project_row = Adw.EntryRow(title="Project scan roots")
-        project_row.set_text(", ".join(str(p) for p in self.config.project_scan_roots))
-        group.add(project_row)
-
-        engine_install_row = Adw.EntryRow(title="Install directory")
-        engine_install_row.set_text(str(self.config.engine_install_dir))
-        group.add(engine_install_row)
-
-        engine_cache_row = Adw.EntryRow(title="Zip cache")
-        engine_cache_row.set_text(str(self.config.engine_cache_dir))
-        group.add(engine_cache_row)
-
+        preferred = Adw.PreferencesGroup(title="Engine")
+        preferred.add_css_class("mates-settings")
+        self.settings_group = preferred
         self._sync_preferred_engine_row()
+        box.append(preferred)
 
-        box.append(group)
+        folders = Adw.PreferencesGroup(
+            title="Folders",
+            description="Install location, zip cache, and extra engine scan paths",
+        )
+        folders.add_css_class("mates-settings")
+        self._install_dir_row = self._add_single_folder_row(
+            folders,
+            "Install directory",
+            "Where new engines are extracted",
+            "engine_install_dir",
+        )
+        self._cache_dir_row = self._add_single_folder_row(
+            folders,
+            "Zip cache",
+            "Downloaded engine archives",
+            "engine_cache_dir",
+        )
+        self._rebuild_folder_list_rows(
+            folders, "engine_roots", add_title="Add engine scan folder"
+        )
+        self._engine_roots_group = folders
+        box.append(folders)
 
-        def _persist_settings(*_args: object) -> None:
-            self.config.set(
-                "engine_roots",
-                [p.strip() for p in engine_row.get_text().split(",") if p.strip()],
-            )
-            self.config.set(
-                "project_scan_roots",
-                [p.strip() for p in project_row.get_text().split(",") if p.strip()],
-            )
-            self.config.set("engine_install_dir", engine_install_row.get_text().strip())
-            self.config.set("engine_cache_dir", engine_cache_row.get_text().strip())
-            self.config.save()
-            self.refresh_all()
+        projects = Adw.PreferencesGroup(
+            title="Projects",
+            description="Folders scanned for .uproject files",
+        )
+        projects.add_css_class("mates-settings")
+        self._rebuild_folder_list_rows(
+            projects, "project_scan_roots", add_title="Add project folder"
+        )
+        self._project_roots_group = projects
+        box.append(projects)
 
-        for row in (
-            engine_row,
-            project_row,
-            engine_install_row,
-            engine_cache_row,
-        ):
-            row.connect("apply", _persist_settings)
-
-        updates = Adw.PreferencesGroup(title="Updates")
+        updates = Adw.PreferencesGroup(
+            title="Updates",
+            description="AppImage updates from GitHub Releases",
+        )
         updates.add_css_class("mates-settings")
 
-        version_row = Adw.ActionRow(title="Version", subtitle=f"v{__version__}")
-        check_btn = self._flat_btn(icon=icons.REFRESH, tooltip="Check for updates")
+        version_row = Adw.ActionRow(
+            title=f"v{__version__}",
+            subtitle="Up to date — check anytime",
+        )
+        check_btn = self._settings_btn(icons.REFRESH, "Check for updates")
         check_btn.connect("clicked", lambda *_: self._check_for_updates(manual=True))
         self._update_check_btn = check_btn
         version_row.add_suffix(check_btn)
         updates.add(version_row)
+        self._update_status_row = version_row
 
         startup_row = Adw.SwitchRow(
             title="Check on startup",
-            subtitle="Look for a newer AppImage on GitHub once a day",
+            subtitle="Once a day when the launcher opens",
         )
         startup_row.set_active(bool(self.config.get("check_updates_on_startup", True)))
 
@@ -674,26 +684,21 @@ class MatesUnrealLauncherApp(Adw.Application):
         startup_row.connect("notify::active", _on_startup_toggle)
         updates.add(startup_row)
 
-        status_row = Adw.ActionRow(
-            title="Status",
-            subtitle="Updates replace the running AppImage when available.",
+        releases = Adw.ActionRow(
+            title="GitHub releases",
+            subtitle="Release notes and manual downloads",
         )
-        updates.add(status_row)
-        self._update_status_row = status_row
-
-        releases = Adw.ActionRow(title="Release notes on GitHub")
-        open_releases = self._flat_btn(
-            icon=icons.EXTERNAL, tooltip="Open GitHub releases"
-        )
+        releases.set_activatable(True)
+        open_releases = self._settings_btn(icons.EXTERNAL, "Open in browser")
         open_releases.connect("clicked", lambda *_: self._open_url(RELEASES_PAGE))
         releases.add_suffix(open_releases)
+        releases.connect("activated", lambda *_: self._open_url(RELEASES_PAGE))
         updates.add(releases)
 
         box.append(updates)
 
         about = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         about.add_css_class("mates-about")
-        about.set_margin_top(8)
         about_mark = self._brand_mark_widget(28)
         if about_mark is not None:
             about.append(about_mark)
@@ -707,6 +712,232 @@ class MatesUnrealLauncherApp(Adw.Application):
         about.append(about_text)
         box.append(about)
         return clamp
+
+    def _config_path_list(self, key: str) -> list[str]:
+        raw = self.config.get(key) or []
+        if not isinstance(raw, list):
+            return []
+        return [str(Path(p).expanduser()) for p in raw if str(p).strip()]
+
+    def _save_path_list(self, key: str, paths: list[str]) -> None:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in paths:
+            text = str(Path(raw).expanduser())
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            cleaned.append(text)
+        self.config.set(key, cleaned)
+        self.config.save()
+        self.refresh_all()
+
+    def _choose_folder(
+        self,
+        title: str,
+        initial: Path | None,
+        on_picked: Callable[[Path], None],
+    ) -> None:
+        dialog = Gtk.FileDialog(title=title)
+        if initial is not None:
+            start = initial.expanduser()
+            if start.is_dir():
+                dialog.set_initial_folder(Gio.File.new_for_path(str(start)))
+            elif start.parent.is_dir():
+                dialog.set_initial_folder(Gio.File.new_for_path(str(start.parent)))
+
+        def _done(dlg: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+            try:
+                folder = dlg.select_folder_finish(result)
+            except GLib.Error:
+                return
+            if not folder:
+                return
+            path = folder.get_path()
+            if path:
+                on_picked(Path(path))
+
+        assert self.window is not None
+        dialog.select_folder(self.window, None, _done)
+
+    def _rebuild_folder_list_rows(
+        self,
+        group: Adw.PreferencesGroup,
+        config_key: str,
+        *,
+        add_title: str = "Add folder",
+    ) -> None:
+        for row in self._folder_list_rows.get(config_key, []):
+            group.remove(row)
+        self._folder_list_rows[config_key] = []
+
+        for path in self._config_path_list(config_key):
+            row = self._make_folder_entry_row(
+                group, config_key, path, title="Folder", add_title=add_title
+            )
+            self._folder_list_rows[config_key].append(row)
+
+        # Trailing editable row replaces the old header + button.
+        add_row = self._make_folder_entry_row(
+            group, config_key, "", title=add_title, add_title=add_title
+        )
+        self._folder_list_rows[config_key].append(add_row)
+
+    def _make_folder_entry_row(
+        self,
+        group: Adw.PreferencesGroup,
+        config_key: str,
+        path: str,
+        *,
+        title: str = "Folder",
+        add_title: str = "Add folder",
+    ) -> Adw.EntryRow:
+        row = Adw.EntryRow(title=title)
+        row.set_text(path)
+        row.set_show_apply_button(True)
+        row.add_prefix(self._icon_image(icons.FOLDER, 16))
+
+        def _commit(_row: Adw.EntryRow | None = None, previous: str = path) -> None:
+            text = row.get_text().strip()
+            if not text:
+                if previous:
+                    self._remove_folder_from_list(
+                        config_key, previous, group, add_title=add_title
+                    )
+                return
+            new = str(Path(text).expanduser())
+            if previous:
+                if new == previous:
+                    return
+                self._replace_folder_in_list(
+                    config_key, previous, Path(new), group, add_title=add_title
+                )
+            else:
+                self._add_folder_to_list(
+                    config_key, Path(new), group, add_title=add_title
+                )
+
+        row.connect("apply", lambda *_: _commit())
+
+        browse = self._settings_btn(icons.FOLDER_OPEN, "Browse for folder")
+
+        def _browse(_btn: Gtk.Button) -> None:
+            start = row.get_text().strip() or path or str(Path.home())
+
+            def _picked(picked: Path) -> None:
+                row.set_text(str(picked.expanduser()))
+                _commit(previous=path)
+
+            self._choose_folder("Choose folder", Path(start), _picked)
+
+        browse.connect("clicked", _browse)
+        row.add_suffix(browse)
+
+        if path:
+            remove = self._settings_btn(icons.TRASH, "Remove folder")
+            remove.connect(
+                "clicked",
+                lambda _b, current=path: self._remove_folder_from_list(
+                    config_key, current, group, add_title=add_title
+                ),
+            )
+            row.add_suffix(remove)
+
+        group.add(row)
+        return row
+
+    def _add_folder_to_list(
+        self,
+        config_key: str,
+        path: Path,
+        group: Adw.PreferencesGroup,
+        *,
+        add_title: str = "Add folder",
+    ) -> None:
+        paths = self._config_path_list(config_key)
+        text = str(path.expanduser())
+        if text not in paths:
+            paths.append(text)
+            self._save_path_list(config_key, paths)
+        self._rebuild_folder_list_rows(group, config_key, add_title=add_title)
+
+    def _replace_folder_in_list(
+        self,
+        config_key: str,
+        old: str,
+        new: Path,
+        group: Adw.PreferencesGroup,
+        *,
+        add_title: str = "Add folder",
+    ) -> None:
+        paths = self._config_path_list(config_key)
+        text = str(new.expanduser())
+        updated = [text if p == old else p for p in paths]
+        if text not in updated:
+            updated.append(text)
+        self._save_path_list(config_key, updated)
+        self._rebuild_folder_list_rows(group, config_key, add_title=add_title)
+
+    def _remove_folder_from_list(
+        self,
+        config_key: str,
+        path: str,
+        group: Adw.PreferencesGroup,
+        *,
+        add_title: str = "Add folder",
+    ) -> None:
+        paths = [p for p in self._config_path_list(config_key) if p != path]
+        self._save_path_list(config_key, paths)
+        self._rebuild_folder_list_rows(group, config_key, add_title=add_title)
+
+    def _add_single_folder_row(
+        self,
+        group: Adw.PreferencesGroup,
+        title: str,
+        subtitle_fallback: str,
+        config_key: str,
+    ) -> Adw.EntryRow:
+        current = str(Path(str(self.config.get(config_key) or "")).expanduser())
+        row = Adw.EntryRow(title=title)
+        row.set_text(current or "")
+        row.set_show_apply_button(True)
+        row.add_prefix(self._icon_image(icons.FOLDER_OPEN, 16))
+
+        def _commit(*_args: object) -> None:
+            text = row.get_text().strip()
+            if not text:
+                self.toast(f"{title} can’t be empty")
+                row.set_text(str(self.config.get(config_key) or current))
+                return
+            self._set_single_folder(config_key, Path(text), row)
+
+        row.connect("apply", _commit)
+
+        browse = self._settings_btn(icons.FOLDER_OPEN, f"Choose {title.lower()}")
+
+        def _browse(_btn: Gtk.Button) -> None:
+            start = row.get_text().strip() or current or str(Path.home())
+
+            def _picked(picked: Path) -> None:
+                row.set_text(str(picked.expanduser()))
+                self._set_single_folder(config_key, picked, row)
+
+            self._choose_folder(title, Path(start), _picked)
+
+        browse.connect("clicked", _browse)
+        row.add_suffix(browse)
+        group.add(row)
+        return row
+
+    def _set_single_folder(
+        self, config_key: str, path: Path, row: Adw.EntryRow
+    ) -> None:
+        text = str(path.expanduser())
+        self.config.set(config_key, text)
+        self.config.save()
+        row.set_text(text)
+        self.refresh_all()
+        self.toast(f"Updated {row.get_title()}")
 
     # --- data refresh ----------------------------------------------------------
 

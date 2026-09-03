@@ -70,7 +70,8 @@ def css() -> str:
     }}
 
     .mates-about {{
-      padding: 4px 0;
+      padding: 12px 4px 4px 4px;
+      opacity: 0.9;
     }}
 
     .mates-mark {{
@@ -192,5 +193,20 @@ def css() -> str:
 
     .mates-settings row.entry:not(.focused):hover .edit-icon {{
       opacity: 1;
+    }}
+
+    .mates-settings button.mates-settings-btn {{
+      min-width: 28px;
+      min-height: 28px;
+      padding: 4px;
+      opacity: 0.75;
+    }}
+
+    .mates-settings button.mates-settings-btn:hover {{
+      opacity: 1;
+    }}
+
+    .mates-settings-page {{
+      margin-top: 4px;
     }}
     """
