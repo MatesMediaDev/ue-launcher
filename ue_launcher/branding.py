@@ -186,15 +186,6 @@ def css() -> str:
       margin: 1px 0;
     }}
 
-    .mates-settings row.entry .edit-icon {{
-      opacity: 0;
-      transition: opacity 120ms ease;
-    }}
-
-    .mates-settings row.entry:not(.focused):hover .edit-icon {{
-      opacity: 1;
-    }}
-
     .mates-settings button.mates-settings-btn {{
       min-width: 28px;
       min-height: 28px;

@@ -31,6 +31,7 @@ from ..epic import (
 from ..epic.cosmos import EngineBlob, list_linux_engine_blobs, open_linux_downloads
 from ..epic.engine_install import install_engine
 from ..epic.fab import FabAsset, clear_library_cache, list_library_cached, load_library_cache
+from ..download_queue import JobState, LibraryDownloadQueue, LibraryJob
 from ..launch import launch_editor, open_in_file_manager
 from ..plugins import (
     asset_kind,
@@ -109,11 +110,14 @@ class MatesUnrealLauncherApp(Adw.Application):
         self.toast_overlay: Adw.ToastOverlay | None = None
         self._installing_engine = False
         self._removing_engine = False
-        self._installing_plugin = False
         self._checking_update = False
         self._installing_update = False
         self._update_check_btn: Gtk.Button | None = None
         self._update_status_row: Adw.ActionRow | None = None
+        self._queue_btn: Gtk.Button | None = None
+        self._library_queue = LibraryDownloadQueue(on_changed=self._on_library_queue_changed)
+        self._queue_announced: set[str] = set()
+        self._building_plugin = False
         self._plugin_search_query = ""
         self._plugin_textures: dict[str, Gdk.Texture] = {}
         self._project_textures: dict[str, Gdk.Texture] = {}
@@ -576,7 +580,17 @@ class MatesUnrealLauncherApp(Adw.Application):
             tooltip="Refresh Fab library from Epic",
         )
         refresh_btn.connect("clicked", lambda *_: self._load_plugins_async(force_refresh=True))
-        box.append(self._section_header("Library", self.plugin_engine_dropdown, refresh_btn))
+        queue_btn = self._flat_btn(
+            icon=icons.DOWNLOAD,
+            tooltip="Library download queue",
+        )
+        queue_btn.connect("clicked", lambda *_: self._show_library_queue_dialog())
+        self._queue_btn = queue_btn
+        box.append(
+            self._section_header(
+                "Library", self.plugin_engine_dropdown, queue_btn, refresh_btn
+            )
+        )
 
         search_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         search_row.append(self._icon_image(icons.SEARCH, 16, tooltip="Search"))
@@ -1601,9 +1615,6 @@ class MatesUnrealLauncherApp(Adw.Application):
         threading.Thread(target=worker, daemon=True).start()
 
     def _plugin_install_dialog(self, asset: FabAsset) -> None:
-        if self._installing_plugin:
-            self.toast("A plugin install is already running")
-            return
         if not load_tokens():
             self.toast("Sign in with Epic first")
             return
@@ -1724,7 +1735,10 @@ class MatesUnrealLauncherApp(Adw.Application):
 
         dialog.set_extra_child(body)
         dialog.add_response("cancel", "Cancel")
-        dialog.add_response("install", "Install")
+        install_label = (
+            "Add to queue" if self._library_queue.pending_count() else "Install"
+        )
+        dialog.add_response("install", install_label)
         dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
         dialog.set_default_response("install")
         dialog.set_close_response("cancel")
@@ -1781,92 +1795,135 @@ class MatesUnrealLauncherApp(Adw.Application):
         as_project_pack: bool = False,
         as_content: bool = False,
     ) -> None:
-        if self._installing_plugin:
-            self.toast("A plugin install is already running")
-            return
         if as_content and project is None:
             self.toast("Select a project for content")
             return
 
-        where = (
-            f"project {project.name}"
-            if project is not None
-            else ("projects folder" if as_project_pack else engine.path.name)
+        job = LibraryJob(
+            asset=asset,
+            engine=engine,
+            project=project,
+            as_project_pack=as_project_pack,
+            as_content=as_content,
+            projects_root=Path.home() / "UnrealProjects",
+            cache_dir=self.config.plugin_cache_dir,
         )
-        self._installing_plugin = True
-        self._set_status(f"Installing {asset.title} → {where}…")
+        before = self._library_queue.pending_count()
+        queued = self._library_queue.enqueue(job)
+        after = self._library_queue.pending_count()
+        if queued.id != job.id:
+            self.toast(f"{asset.title} is already in the queue")
+        elif after > 1 and before >= 1:
+            self.toast(f"Queued {asset.title} — {after - 1} ahead")
+        else:
+            self.toast(f"Installing {asset.title}…")
+        self._refresh_queue_status()
 
-        projects_root = Path.home() / "UnrealProjects"
-
-        def worker() -> None:
-            try:
-
-                def prog(msg: str, done: int, total: int) -> None:
-                    if total:
-                        pct = min(100, int(done * 100 / total))
-                        GLib.idle_add(self._set_status, f"{asset.title}: {msg} — {pct}%")
-                    else:
-                        GLib.idle_add(self._set_status, f"{asset.title}: {msg}")
-
-                if as_project_pack:
-                    dest = install_fab_project(
-                        asset,
-                        engine,
-                        projects_root,
-                        self.config.plugin_cache_dir,
-                        progress=prog,
-                    )
-                elif as_content:
-                    assert project is not None
-                    dest = install_fab_content(
-                        asset,
-                        engine,
-                        project,
-                        self.config.plugin_cache_dir,
-                        progress=prog,
-                    )
-                else:
-                    dest = install_fab_plugin(
-                        asset,
-                        engine,
-                        self.config.plugin_cache_dir,
-                        project=project,
-                        progress=prog,
-                    )
-                err = None
-            except Exception as exc:  # noqa: BLE001
-                dest = None
-                err = str(exc)
-
-            def done() -> bool:
-                self._installing_plugin = False
-                if err:
-                    self.toast(err)
-                    self._set_status("Install failed")
-                else:
-                    assert dest is not None
-                    if as_project_pack:
+    def _on_library_queue_changed(self) -> None:
+        def ui() -> bool:
+            self._refresh_queue_status()
+            for job in self._library_queue.jobs():
+                if job.id in self._queue_announced:
+                    continue
+                if job.state == JobState.DONE:
+                    self._queue_announced.add(job.id)
+                    self.toast(f"Installed {job.title}")
+                    if job.as_project_pack:
                         self.refresh_all()
                     else:
                         self._populate_plugins()
-                    self.toast(f"Installed {asset.title}")
-                    self._set_status(f"Installed → {dest}")
-                return False
+                elif job.state == JobState.FAILED:
+                    self._queue_announced.add(job.id)
+                    self.toast(job.error or f"Failed: {job.title}")
+                elif job.state == JobState.CANCELLED:
+                    self._queue_announced.add(job.id)
+                    self.toast(f"Cancelled {job.title}")
+            return False
 
-            GLib.idle_add(done)
+        GLib.idle_add(ui)
 
-        threading.Thread(target=worker, daemon=True).start()
+    def _refresh_queue_status(self) -> None:
+        line = self._library_queue.status_line()
+        pending = self._library_queue.pending_count()
+        if self._queue_btn is not None:
+            self._queue_btn.set_tooltip_text(
+                f"Library queue ({pending})" if pending else "Library download queue"
+            )
+        if line:
+            self._set_status(line)
+
+    def _show_library_queue_dialog(self) -> None:
+        from gi.repository import Pango
+
+        jobs = self._library_queue.jobs()
+        dialog = Adw.AlertDialog(
+            heading="Library download queue",
+            body="Installs run one at a time. Queued items can be cancelled.",
+        )
+        dialog.add_response("close", "Close")
+        dialog.add_response("clear", "Clear finished")
+        dialog.set_default_response("close")
+        dialog.set_close_response("close")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(8)
+        if not jobs:
+            empty = Gtk.Label(label="Queue is empty", xalign=0)
+            empty.add_css_class("dim-label")
+            box.append(empty)
+        else:
+            for job in reversed(jobs[-20:]):
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                label = Gtk.Label(
+                    label=f"{job.title} → {job.target_label}",
+                    xalign=0,
+                    hexpand=True,
+                )
+                label.set_ellipsize(Pango.EllipsizeMode.END)
+                state = Gtk.Label(label=job.state.value, xalign=1)
+                state.add_css_class("dim-label")
+                row.append(label)
+                row.append(state)
+                if job.state == JobState.QUEUED:
+                    cancel = self._flat_btn(icons.TRASH, "Cancel")
+                    cancel.connect(
+                        "clicked",
+                        lambda _b, jid=job.id: (
+                            self._library_queue.cancel(jid),
+                            self._refresh_queue_status(),
+                        ),
+                    )
+                    row.append(cancel)
+                elif job.state == JobState.RUNNING and job.progress_pct is not None:
+                    state.set_label(f"{job.progress_pct}%")
+                box.append(row)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_min_content_height(160)
+        scrolled.set_max_content_height(320)
+        scrolled.set_child(box)
+        dialog.set_extra_child(scrolled)
+
+        def _on_response(_d: Adw.AlertDialog, response: str) -> None:
+            if response == "clear":
+                self._library_queue.clear_finished()
+                self._queue_announced.clear()
+
+        dialog.connect("response", _on_response)
+        assert self.window is not None
+        dialog.present(self.window)
 
     def _build_installed_plugin(self, plugin_dir: Path) -> None:
         engine = self._selected_plugin_engine()
         if not engine:
             self.toast("Select an engine")
             return
-        if self._installing_plugin:
-            self.toast("An install/build is already running")
+        if self._building_plugin or self._library_queue.pending_count():
+            self.toast("Wait for the library queue to finish")
             return
 
-        self._installing_plugin = True
+        self._building_plugin = True
         self._set_status(f"Building {plugin_dir.name} for Linux…")
 
         def worker() -> None:
@@ -1881,14 +1938,16 @@ class MatesUnrealLauncherApp(Adw.Application):
                 err = str(exc)
 
             def done() -> bool:
-                self._installing_plugin = False
+                self._building_plugin = False
                 if err:
                     self.toast(err)
                     self._set_status("Plugin build failed")
                 else:
                     self._populate_plugins()
                     self.toast(f"Built {plugin_dir.name} for Linux")
-                    self._set_status(f"Ready — restart the editor to load {plugin_dir.name}")
+                    self._set_status(
+                        f"Ready — restart the editor to load {plugin_dir.name}"
+                    )
                 return False
 
             GLib.idle_add(done)
